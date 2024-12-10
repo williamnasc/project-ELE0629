@@ -66,14 +66,8 @@ void mpu6050_test(void *pvParameters)
     }
 }
 
-void app_main(void)
+void mqtt_task(void *pvParameters)
 {
-
-    // task
-    ESP_ERROR_CHECK(i2cdev_init());
-
-    xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-
     // Inicializando NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -109,4 +103,15 @@ void app_main(void)
 
        vTaskDelay(5000/portTICK_PERIOD_MS);
    }
+}
+
+void app_main(void)
+{
+    // task
+    ESP_ERROR_CHECK(i2cdev_init());
+
+    xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+    xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+
+    vTaskDelay(5000/portTICK_PERIOD_MS);
 }
