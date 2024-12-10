@@ -1,9 +1,21 @@
 #include <stdio.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <esp_err.h>
-#include <esp_log.h>
-#include <mpu6050.h>
+#include <string.h>
+
+//Includes FreeRTOS
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+//Includes ESP-IDF
+#include "esp_log.h"
+#include "nvs_flash.h"
+#include "esp_random.h"
+#include "esp_err.h"
+
+//Biblioteca criada
+#include "wifi.h"
+#include "MQTT_lib.h"
+
+#include "mpu6050.h"
 
 #ifdef CONFIG_EXAMPLE_I2C_ADDRESS_LOW
 #define ADDR MPU6050_I2C_ADDRESS_LOW
@@ -11,7 +23,7 @@
 #define ADDR MPU6050_I2C_ADDRESS_HIGH
 #endif
 
-static const char *TAG = "mpu6050_test";
+static const char *TAG = "Exemplo MQTT Main";
 
 void mpu6050_test(void *pvParameters)
 {
@@ -54,10 +66,47 @@ void mpu6050_test(void *pvParameters)
     }
 }
 
-void app_main()
+void app_main(void)
 {
+
     // task
     ESP_ERROR_CHECK(i2cdev_init());
 
-    xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
+    xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+
+    // Inicializando NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    wifi_init_sta();    //Inicializando o WiFi. Função da Lib criada, wifi.h
+    ESP_LOGI(TAG, "WiFi foi inicializado!");
+
+    mqtt_start();       //Iniciando conexão MQTT. Função da Lib criada, MQTT.h
+    ESP_LOGI(TAG, "MQTT foi inicializado!");
+
+    //Inscrevendo nos tópicos
+    mqtt_subscribe("teste/william/teste", 0);
+    // mqtt_subscribe("UFRN/Lab/Umidade", 0);
+
+   while(1){
+       int temp = esp_random() % 30;
+       int umidade = esp_random() % 50;
+       char temp_str[10], umidade_str[10];
+       sprintf(temp_str, "%d", temp);
+       sprintf(umidade_str, "%d", umidade);
+
+       if(mqtt_connected()){
+           mqtt_publish("teste/william/teste", temp_str, 0, 0);
+           ESP_LOGI(TAG, "Tempetatura: %d", temp);
+        //    mqtt_publish("UFRN/Lab/Umidade", umidade_str, 0, 0);
+        //    ESP_LOGI(TAG, "Umidade: %d", umidade);
+       }
+
+
+       vTaskDelay(5000/portTICK_PERIOD_MS);
+   }
 }
