@@ -62,7 +62,7 @@ void mqtt_start(void){
         .broker.address.port = 1883,
         .session.keepalive = 10,                                    // Padrão é 120 segundos
         .session.last_will = {
-            .topic = "teste/william/teste",
+            .topic = "ELE0629/Weather/Status",
             .msg = "ADEUS",
             .msg_len = strlen("Offline"),
             .retain = 0
@@ -77,11 +77,11 @@ void mqtt_start(void){
 
     //Primeira mensagem: enviar para UFRN/Lab/status o valor Online
     ESP_LOGI(TAG, "Primeira publicação. Setando Online!");
-    mqtt_publish("UFRN/Lab/status", "Online", 1, 0);
+    mqtt_publish("ELE0629/Weather/Status", "Online", 1, 0);
 }
 
 void mqtt_subscribe(char *topic, int qos){
-
+    // TODO > O QUE FAZER QUANDO A INSCRICAO DER ERRO
     int msg_id = esp_mqtt_client_subscribe(client, topic, qos);
     ESP_LOGI(TAG, "ID da inscrição = %d", msg_id);
 }
