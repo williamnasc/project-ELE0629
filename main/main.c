@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 #include "esp_random.h"
 #include "esp_err.h"
+#include "driver/gpio.h"
 
 //Biblioteca criada
 #include "wifi.h"
@@ -18,6 +19,7 @@
 
 //Bibliotecas externas
 #include "mpu6050.h"
+#include <dht.h>
 
 #ifdef CONFIG_EXAMPLE_I2C_ADDRESS_LOW
 #define ADDR MPU6050_I2C_ADDRESS_LOW
@@ -25,63 +27,79 @@
 #define ADDR MPU6050_I2C_ADDRESS_HIGH
 #endif
 
+#define SENSOR_TYPE DHT_TYPE_DHT11
+
+#define DHT_GPIO 26
+
 QueueHandle_t queueTemperatura;
 QueueHandle_t queueUmidade;
-QueueHandle_t queueSensacao;
 QueueHandle_t queuePressao;
 QueueHandle_t queueMPU;
 
 static const char *TAG = "MQTT Task";
 static const char *TAG_TEMPERATURA = "Temperatura Task";
 static const char *TAG_UMIDADE = "Umidade Task";
-static const char *TAG_SENSACAO = "Sensacao Task";
 static const char *TAG_PRESSAO = "Pressao Task";
-static const char *TAG_MPU = "MPU Task";
+//static const char *TAG_MPU = "MPU Task";
 
 // Definição do struct 
 struct Dados { 
     char *texto; 
-    int temperatura;
-    int umidade; 
-    int pressao;
-    int sensacao; 
+    float temperatura;
+    float umidade; 
+    int pressao; 
 };
 
 void temperatura_task(void *pvParameters)
 {
-    //inicia a fila que salva os valores de temperatura
-    queueTemperatura = xQueueCreate(1, sizeof(uint32_t));
+    float temperatura, umidade;
+    gpio_set_pull_mode(DHT_GPIO, GPIO_PULLUP_ONLY);
     
-    int count = 0;
-    while (1) {
-        count++;
-        // Envia o valor de 'count' para a fila
-        if (xQueueSend(queueTemperatura, &count, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG_TEMPERATURA, "Enviado para a fila: %d", count);
-        } else {
-            ESP_LOGE(TAG_TEMPERATURA, "Falha ao enviar para a fila");
+    //inicia a fila que salva os valores de temperatura
+    queueTemperatura = xQueueCreate(1, sizeof(float));
+    
+    while (1)
+    {
+          
+        if (dht_read_float_data(SENSOR_TYPE, DHT_GPIO, &umidade, &temperatura) == ESP_OK)
+        {
+            ESP_LOGI(TAG_TEMPERATURA, "Temperatura: %.2f C", temperatura);
+            if (xQueueSend(queueTemperatura, &temperatura, portMAX_DELAY) != pdPASS)
+            {
+                ESP_LOGE(TAG_TEMPERATURA, "Falha ao enviar temperatura para a fila");
+            }
+        }
+        else
+        {
+            ESP_LOGE(TAG_TEMPERATURA, "Falha ao ler sensor DHT11");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1000));  // Aguarda 1 segundo
+        vTaskDelay(pdMS_TO_TICKS(2000));  // Aguarda 2 segundos
     }
 }
 
 void umidade_task(void *pvParameters)
 {
-    //inicia a fila que salva os valores de temperatura
-    queueUmidade = xQueueCreate(1, sizeof(uint32_t));
+    float temperatura, umidade;
+    gpio_set_pull_mode(DHT_GPIO, GPIO_PULLUP_ONLY);
+    queueUmidade = xQueueCreate(1, sizeof(float));
     
-    int count = 0;
-    while (1) {
-        count++;
-        // Envia o valor de 'count' para a fila
-        if (xQueueSend(queueUmidade, &count, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG_UMIDADE, "Enviado para a fila: %d", count);
-        } else {
-            ESP_LOGE(TAG_UMIDADE, "Falha ao enviar para a fila");
+    while (1)
+     {
+        if (dht_read_float_data(SENSOR_TYPE, DHT_GPIO, &umidade, &temperatura) == ESP_OK)
+        {
+            ESP_LOGI(TAG_UMIDADE, "Umidade: %.2f", umidade);
+            if (xQueueSend(queueUmidade, &umidade, portMAX_DELAY) != pdPASS)
+            {
+                ESP_LOGE(TAG_UMIDADE, "Falha ao enviar umidade para a fila");
+            }
+        }
+        else
+        {
+            ESP_LOGE(TAG_UMIDADE, "Falha ao ler sensor DHT11");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1000));  // Aguarda 1 segundo
+        vTaskDelay(pdMS_TO_TICKS(2000));  // Aguarda 2 segundos
     }
 }
 
@@ -104,26 +122,7 @@ void pressao_task(void *pvParameters)
     }
 }
 
-void sensacao_task(void *pvParameters)
-{
-    //inicia a fila que salva os valores de temperatura
-    queueSensacao = xQueueCreate(1, sizeof(uint32_t));
-    
-    int count = 0;
-    while (1) {
-        count++;
-        // Envia o valor de 'count' para a fila
-        if (xQueueSend(queueSensacao, &count, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG_SENSACAO, "Enviado para a fila: %d", count);
-        } else {
-            ESP_LOGE(TAG_SENSACAO, "Falha ao enviar para a fila");
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(1000));  // Aguarda 1 segundo
-    }
-}
-
-void mpu6050_test(void *pvParameters)
+/*void mpu6050_test(void *pvParameters)
 {
     mpu6050_dev_t dev = { 0 };
 
@@ -169,7 +168,7 @@ void mpu6050_test(void *pvParameters)
 
         vTaskDelay(pdMS_TO_TICKS(1000));  // Aguarda 1 segundo
     }
-}
+}*/
 
 void mqtt_task(void *pvParameters)
 {
@@ -189,7 +188,7 @@ void mqtt_task(void *pvParameters)
 
    while(1){
         // INICIA A ESTRUTA QUE JUNTA OS DADOS
-        struct Dados pacote = {NULL, NULL, NULL, NULL, NULL};
+        struct Dados pacote = {NULL, 1.0, 0.0, NULL};
 
        if(mqtt_connected()){
             
@@ -197,28 +196,23 @@ void mqtt_task(void *pvParameters)
             mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
 
             // Espera receber um valor da fila de Temperatura
-            char received_mpu[50];
+            /*char received_mpu[50];
             if (xQueueReceive(queueMPU, &received_mpu, portMAX_DELAY) == pdTRUE) {
                 ESP_LOGI(TAG_TEMPERATURA, "Recebido do MPU: %s",  received_mpu);
                 // pacote.texto = received_mpu;
                 mqtt_publish("ELE0629/Weather/MPU", received_mpu, 0, 0);   
-            }
+            }*/
 
             // Espera receber um valor da fila de Temperatura
-            int received_temperatura;
+            float received_temperatura;
             if (xQueueReceive(queueTemperatura, &received_temperatura, portMAX_DELAY) == pdTRUE) {
-                ESP_LOGI(TAG_TEMPERATURA, "Recebido da fila temp: %d",  received_temperatura);
+                ESP_LOGI(TAG_TEMPERATURA, "Recebido da fila temp: %.2f",  received_temperatura);
                 pacote.temperatura = received_temperatura;   
             }
 
-            int received_umidade;
+            float received_umidade;
             if (xQueueReceive(queueUmidade, &received_umidade, portMAX_DELAY) == pdTRUE) {
                 pacote.umidade = received_umidade;   
-            }
-
-            int received_sensacao;
-            if (xQueueReceive(queueSensacao, &received_sensacao, portMAX_DELAY) == pdTRUE) {
-                pacote.sensacao = received_sensacao;   
             }
 
             int received_pressao;
@@ -228,13 +222,10 @@ void mqtt_task(void *pvParameters)
 
             
             //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
-            if (pacote.temperatura != NULL && 
-                pacote.umidade != NULL && 
-                pacote.pressao != NULL &&
-                pacote.sensacao != NULL
-                ){
+            if (pacote.temperatura != 1.0 && pacote.umidade != 0.0 && pacote.pressao != NULL)
+            {
 
-                ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %d",  pacote.temperatura);
+                ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
                 // // CONVERTE O VALOR RECEBIDO PARA STRING
                 // char converted_temp[50];
                 // sprintf(converted_temp, "%d", pacote.temperatura);
@@ -245,24 +236,23 @@ void mqtt_task(void *pvParameters)
                 char json_string[50];
                 sprintf(
                     json_string, 
-                    "{Temp: %d, Umi: %d, Press: %d, Sens: %d}", 
-                    pacote.temperatura, pacote.umidade, pacote.pressao, pacote.sensacao
+                    "{Temp: %.2f °C, Umi: %.2f, Press: %d}", 
+                    pacote.temperatura, pacote.umidade, pacote.pressao
                 );        
 
                 mqtt_publish("ELE0629/Weather/Data", json_string, 0, 0);
 
                 // RESETA OS VALORES DO STRUT
                 pacote.texto = NULL;
-                pacote.temperatura = NULL;
-                pacote.umidade = NULL;
+                pacote.temperatura = 1.0;
+                pacote.umidade = 0.0;
                 pacote.pressao = NULL;
-                pacote.sensacao = NULL;
 
             }
        }
 
 
-       vTaskDelay(2000/portTICK_PERIOD_MS);
+       vTaskDelay(4000/portTICK_PERIOD_MS);
    }
 }
 
@@ -271,11 +261,10 @@ void app_main(void)
     // task
     ESP_ERROR_CHECK(i2cdev_init());
 
-    xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+    //xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
     xTaskCreate(temperatura_task, "temperatura_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
     xTaskCreate(umidade_task, "umidade_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
     xTaskCreate(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-    xTaskCreate(sensacao_task, "sensacao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
     xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
 
     vTaskDelay(5000/portTICK_PERIOD_MS);
