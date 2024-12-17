@@ -50,13 +50,14 @@ struct Dados {
     int pressao; 
 };
 
-void temperatura_task(void *pvParameters)
+void dht11_task(void *pvParameters)
 {
     float temperatura, umidade;
     gpio_set_pull_mode(DHT_GPIO, GPIO_PULLUP_ONLY);
     
     //inicia a fila que salva os valores de temperatura
     queueTemperatura = xQueueCreate(1, sizeof(float));
+    queueUmidade = xQueueCreate(1, sizeof(float));
     
     while (1)
     {
@@ -68,6 +69,11 @@ void temperatura_task(void *pvParameters)
             {
                 ESP_LOGE(TAG_TEMPERATURA, "Falha ao enviar temperatura para a fila");
             }
+            ESP_LOGI(TAG_UMIDADE, "Umidade: %.2f", umidade);
+            if (xQueueSend(queueUmidade, &umidade, portMAX_DELAY) != pdPASS)
+            {
+                ESP_LOGE(TAG_UMIDADE, "Falha ao enviar umidade para a fila");
+            }
         }
         else
         {
@@ -78,30 +84,6 @@ void temperatura_task(void *pvParameters)
     }
 }
 
-void umidade_task(void *pvParameters)
-{
-    float temperatura, umidade;
-    gpio_set_pull_mode(DHT_GPIO, GPIO_PULLUP_ONLY);
-    queueUmidade = xQueueCreate(1, sizeof(float));
-    
-    while (1)
-     {
-        if (dht_read_float_data(SENSOR_TYPE, DHT_GPIO, &umidade, &temperatura) == ESP_OK)
-        {
-            ESP_LOGI(TAG_UMIDADE, "Umidade: %.2f", umidade);
-            if (xQueueSend(queueUmidade, &umidade, portMAX_DELAY) != pdPASS)
-            {
-                ESP_LOGE(TAG_UMIDADE, "Falha ao enviar umidade para a fila");
-            }
-        }
-        else
-        {
-            ESP_LOGE(TAG_UMIDADE, "Falha ao ler sensor DHT11");
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(2000));  // Aguarda 2 segundos
-    }
-}
 
 void pressao_task(void *pvParameters)
 {
@@ -262,8 +244,7 @@ void app_main(void)
     ESP_ERROR_CHECK(i2cdev_init());
 
     //xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-    xTaskCreate(temperatura_task, "temperatura_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-    xTaskCreate(umidade_task, "umidade_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+    xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
     xTaskCreate(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
     xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
 
