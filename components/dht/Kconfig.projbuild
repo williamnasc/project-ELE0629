@@ -1,4 +1,4 @@
-menu "DHT11 Example configuration"
+menu "DHT11_CONFIG"
     choice EXAMPLE_CHIP_TYPE
         prompt "Select chip type"
         default EXAMPLE_TYPE_DHT11
