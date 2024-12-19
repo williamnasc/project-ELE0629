@@ -23,13 +23,21 @@
 #include <bmp180.h>
 #include <dht.h>
 
+//Configuração do bmp180
 #ifndef APP_CPU_NUM
 #define APP_CPU_NUM PRO_CPU_NUM
 #endif
 
+//Configuração do dht11 (tipo do sensor)
+#if defined(CONFIG_EXAMPLE_TYPE_DHT11)
 #define SENSOR_TYPE DHT_TYPE_DHT11
-
-#define DHT_GPIO 4
+#endif
+#if defined(CONFIG_EXAMPLE_TYPE_AM2301)
+#define SENSOR_TYPE DHT_TYPE_AM2301
+#endif
+#if defined(CONFIG_EXAMPLE_TYPE_SI7021)
+#define SENSOR_TYPE DHT_TYPE_SI7021
+#endif
 
 QueueHandle_t queueTemperatura;
 QueueHandle_t queueUmidade;
@@ -51,7 +59,10 @@ struct Dados {
 void dht11_task(void *pvParameters)
 {
     float temperatura, umidade;
-    gpio_set_pull_mode(DHT_GPIO, GPIO_PULLUP_ONLY);
+    //Configuração do dht11 (pullup interno)
+    #ifdef CONFIG_EXAMPLE_INTERNAL_PULLUP
+        gpio_set_pull_mode(CONFIG_EXAMPLE_DATA_GPIO, GPIO_PULLUP_ONLY);
+    #endif
     
     //inicia a fila que salva os valores de temperatura
     queueTemperatura = xQueueCreate(1, sizeof(float));
@@ -60,7 +71,7 @@ void dht11_task(void *pvParameters)
     while (1)
     {
           
-        if (dht_read_float_data(SENSOR_TYPE, DHT_GPIO, &umidade, &temperatura) == ESP_OK)
+        if (dht_read_float_data(SENSOR_TYPE, CONFIG_EXAMPLE_DATA_GPIO, &umidade, &temperatura) == ESP_OK)
         {
             ESP_LOGI(TAG_TEMPERATURA, "Temperatura: %.2f C", temperatura);
             if (xQueueSend(queueTemperatura, &temperatura, portMAX_DELAY) != pdPASS)
