@@ -2,129 +2,117 @@
 #include <string.h>
 #include <inttypes.h>
 
-//Includes FreeRTOS
+// Includes FreeRTOS
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
-//Includes ESP-IDF
+// Includes ESP-IDF
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include "esp_random.h"
 #include "esp_err.h"
-#include "driver/gpio.h"
-#include <esp_system.h>
 
-//Biblioteca criada
+// SPIFFS
+#include "esp_spiffs.h"
+
+// MQTT e Wi-Fi
 #include "wifi.h"
 #include "MQTT_lib.h"
 
-//Bibliotecas externas
-#include <bmp180.h>
+// DHT
 #include <dht.h>
 
-//Configuração do bmp180
-#ifndef APP_CPU_NUM
-#define APP_CPU_NUM PRO_CPU_NUM
-#endif
-
-//Configuração do dht11 (tipo do sensor)
+// Configuração do DHT
 #if defined(CONFIG_EXAMPLE_TYPE_DHT11)
 #define SENSOR_TYPE DHT_TYPE_DHT11
 #endif
-#if defined(CONFIG_EXAMPLE_TYPE_AM2301)
-#define SENSOR_TYPE DHT_TYPE_AM2301
-#endif
-#if defined(CONFIG_EXAMPLE_TYPE_SI7021)
-#define SENSOR_TYPE DHT_TYPE_SI7021
-#endif
 
-QueueHandle_t queueTemperatura;
-QueueHandle_t queueUmidade;
-QueueHandle_t queuePressao;
+// Tags para logging
+static const char *TAG_SPIFFS = "SPIFFS";
+static const char *TAG_MQTT = "MQTT";
+static const char *TAG_DHT = "DHT";
 
-static const char *TAG = "MQTT Task";
-static const char *TAG_TEMPERATURA = "Temperatura Task";
-static const char *TAG_UMIDADE = "Umidade Task";
-static const char *TAG_PRESSAO = "Pressao Task";
+// Fila para comunicação entre tarefas
+static QueueHandle_t queueTemperatura;
+static QueueHandle_t queueUmidade;
 
-// Definição do struct 
-struct Dados { 
-    char *texto; 
-    float temperatura;
-    float umidade; 
-    uint32_t pressao; 
-};
+// Inicialização do SPIFFS
+static esp_err_t init_spiffs() {
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = NULL,
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
 
-void dht11_task(void *pvParameters)
-{
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao inicializar SPIFFS (%s)", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+// Salvar dados no SPIFFS
+static void salvar_dados_spiffs(float temperatura, float umidade) {
+    FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "a");
+    if (arquivo == NULL) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para escrita!");
+        return;
+    }
+
+    fprintf(arquivo, "%.2f,%.2f\n", temperatura, umidade);
+    fclose(arquivo);
+    ESP_LOGI(TAG_SPIFFS, "Dados salvos no SPIFFS: Temp=%.2f°C, Umid=%.2f%%", temperatura, umidade);
+}
+
+// Ler dados do SPIFFS e contar leituras
+static void ler_dados_spiffs() {
+    FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "r");
+    if (arquivo == NULL) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para leitura!");
+        return;
+    }
+
+    ESP_LOGI(TAG_SPIFFS, "Lendo conteúdo do arquivo:");
+    char linha[128];
+    int contador = 0;
+
+    while (fgets(linha, sizeof(linha), arquivo) != NULL) {
+        printf("Leitura %d: %s", ++contador, linha);
+    }
+    fclose(arquivo);
+
+    ESP_LOGI(TAG_SPIFFS, "Total de leituras realizadas: %d", contador);
+}
+
+// Tarefa para leitura do DHT11
+void dht_task(void *pvParameters) {
     float temperatura, umidade;
-    //Configuração do dht11 (pullup interno)
-    #ifdef CONFIG_EXAMPLE_INTERNAL_PULLUP
-        gpio_set_pull_mode(CONFIG_EXAMPLE_DATA_GPIO, GPIO_PULLUP_ONLY);
-    #endif
-    
-    //inicia a fila que salva os valores de temperatura
+
+#ifdef CONFIG_EXAMPLE_INTERNAL_PULLUP
+    gpio_set_pull_mode(CONFIG_EXAMPLE_DATA_GPIO, GPIO_PULLUP_ONLY);
+#endif
+
     queueTemperatura = xQueueCreate(1, sizeof(float));
     queueUmidade = xQueueCreate(1, sizeof(float));
-    
-    while (1)
-    {
-          
-        if (dht_read_float_data(SENSOR_TYPE, CONFIG_EXAMPLE_DATA_GPIO, &umidade, &temperatura) == ESP_OK)
-        {
-            ESP_LOGI(TAG_TEMPERATURA, "Temperatura: %.2f C", temperatura);
-            if (xQueueSend(queueTemperatura, &temperatura, portMAX_DELAY) != pdPASS)
-            {
-                ESP_LOGE(TAG_TEMPERATURA, "Falha ao enviar temperatura para a fila");
-            }
-            ESP_LOGI(TAG_UMIDADE, "Umidade: %.2f", umidade);
-            if (xQueueSend(queueUmidade, &umidade, portMAX_DELAY) != pdPASS)
-            {
-                ESP_LOGE(TAG_UMIDADE, "Falha ao enviar umidade para a fila");
-            }
-        }
-        else
-        {
-            ESP_LOGE(TAG_TEMPERATURA, "Falha ao ler sensor DHT11");
-        }
 
-        vTaskDelay(pdMS_TO_TICKS(2000));  // Aguarda 2 segundos
-    }
-}
+    while (1) {
+        if (dht_read_float_data(SENSOR_TYPE, CONFIG_EXAMPLE_DATA_GPIO, &umidade, &temperatura) == ESP_OK) {
+            ESP_LOGI(TAG_DHT, "Temperatura: %.2f°C, Umidade: %.2f%%", temperatura, umidade);
 
-void pressao_task(void *pvParameters)
-{
-    bmp180_dev_t dev;
-    memset(&dev, 0, sizeof(bmp180_dev_t));
-
-    ESP_ERROR_CHECK(bmp180_init_desc(&dev, 0, CONFIG_EXAMPLE_I2C_MASTER_SDA, CONFIG_EXAMPLE_I2C_MASTER_SCL));
-    ESP_ERROR_CHECK(bmp180_init(&dev));
-
-    //inicia a fila que salva os valores de temperatura
-    queuePressao = xQueueCreate(1, sizeof(uint32_t));
-    
-
-    while (1) 
-    {
-        float temp;
-        uint32_t pressure;
-
-        bmp180_measure(&dev, &temp, &pressure, BMP180_MODE_STANDARD);
-
-        if (xQueueSend(queuePressao, &pressure, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG_PRESSAO, "Enviado para a fila: %"PRIu32"", pressure);
+            xQueueSend(queueTemperatura, &temperatura, portMAX_DELAY);
+            xQueueSend(queueUmidade, &umidade, portMAX_DELAY);
         } else {
-            ESP_LOGE(TAG_PRESSAO, "Falha ao enviar para a fila");
+            ESP_LOGE(TAG_DHT, "Erro ao ler DHT11!");
         }
-
-        vTaskDelay(pdMS_TO_TICKS(2000));  // Aguarda 1 segundo
+        vTaskDelay(pdMS_TO_TICKS(4000));
     }
 }
 
-void mqtt_task(void *pvParameters)
-{
-    // Inicializando NVS
+// Tarefa para salvar e enviar dados
+void mqtt_spiffs_task(void *pvParameters) {
+    float temperatura, umidade;
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -132,76 +120,47 @@ void mqtt_task(void *pvParameters)
     }
     ESP_ERROR_CHECK(ret);
 
-    wifi_init_sta();    //Inicializando o WiFi. Função da Lib criada, wifi.h
-    ESP_LOGI(TAG, "WiFi foi inicializado!");
+    wifi_init_sta();    // Inicializando o WiFi
+    mqtt_start();       // Iniciando conexão MQTT
 
-    mqtt_start();       //Iniciando conexão MQTT. Função da Lib criada, MQTT.h
-    ESP_LOGI(TAG, "MQTT foi inicializado!");
-
-   while(1){
-        // INICIA A ESTRUTA QUE JUNTA OS DADOS
-        struct Dados pacote = {NULL, 0.0, 0.0, 0.0};
-
-       if(mqtt_connected()){
+    while (1) {
+        if (xQueueReceive(queueTemperatura, &temperatura, portMAX_DELAY) &&
+            xQueueReceive(queueUmidade, &umidade, portMAX_DELAY)) {
             
-            // ATUALIZA STATUS
-            mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
+            // Salvar dados no SPIFFS
+            salvar_dados_spiffs(temperatura, umidade);
 
-            // Espera receber um valor da fila de Temperatura
-            float received_temperatura;
-            if (xQueueReceive(queueTemperatura, &received_temperatura, portMAX_DELAY) == pdTRUE) {
-                ESP_LOGI(TAG_TEMPERATURA, "Recebido da fila temp: %.2f",  received_temperatura);
-                pacote.temperatura = received_temperatura;   
+            // Enviar dados via MQTT
+            if (mqtt_connected()) {
+                char msg_temp[50], msg_umid[50];
+                snprintf(msg_temp, sizeof(msg_temp), "Temp: %.2f °C", temperatura);
+                snprintf(msg_umid, sizeof(msg_umid), "Umid: %.2f %%", umidade);
+
+                mqtt_publish("ELE0629/Weather/Temperature", msg_temp, 0, 0);
+                mqtt_publish("ELE0629/Weather/Humidity", msg_umid, 0, 0);
+
+                ESP_LOGI(TAG_MQTT, "Dados enviados via MQTT: %s, %s", msg_temp, msg_umid);
             }
-
-            float received_umidade;
-            if (xQueueReceive(queueUmidade, &received_umidade, portMAX_DELAY) == pdTRUE) {
-                pacote.umidade = received_umidade;   
-            }
-
-            uint32_t received_pressao;
-            if (xQueueReceive(queuePressao, &received_pressao, portMAX_DELAY) == pdTRUE) {
-                pacote.pressao = received_pressao;   
-            }
-
-            
-            //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
-            if (pacote.temperatura != 0.0 && pacote.umidade != 0.0 && pacote.pressao != 0.0)
-            {
-
-                ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
-
-                char json_string[50];
-                sprintf(
-                    json_string, 
-                    "{Temp: %.2f °C, Umi: %.2f, Press: %"PRIu32" Pa}", 
-                    pacote.temperatura, pacote.umidade, pacote.pressao
-                );        
-
-                mqtt_publish("ELE0629/Weather/Data", json_string, 0, 0);
-
-                // RESETA OS VALORES DO STRUT
-                pacote.texto = NULL;
-                pacote.temperatura = 0.0;
-                pacote.umidade = 0.0;
-                pacote.pressao = 0.0;
-
-            }
-       }
-
-
-       vTaskDelay(4000/portTICK_PERIOD_MS);
-   }
+        }
+        vTaskDelay(pdMS_TO_TICKS(4000));
+    }
 }
 
-void app_main(void)
-{
-    // task
-    ESP_ERROR_CHECK(i2cdev_init());
+// Tarefa para ler dados salvos no SPIFFS
+void spiffs_read_task(void *pvParameters) {
+    while (1) {
+        ler_dados_spiffs();
+        vTaskDelay(pdMS_TO_TICKS(100000));
+    }
+}
 
-    xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-    xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL, APP_CPU_NUM);
-    xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+// Função principal
+void app_main(void) {
+    // Inicializar SPIFFS
+    ESP_ERROR_CHECK(init_spiffs());
 
-    vTaskDelay(5000/portTICK_PERIOD_MS);
+    // Criar tarefas
+    xTaskCreate(dht_task, "dht_task", 2048, NULL, 5, NULL);
+    xTaskCreate(mqtt_spiffs_task, "mqtt_spiffs_task", 4096, NULL, 5, NULL);
+    xTaskCreate(spiffs_read_task, "spiffs_read_task", 4096, NULL, 5, NULL);
 }
