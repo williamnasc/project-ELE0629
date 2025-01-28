@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdlib.h>
 
 //Includes FreeRTOS
 #include "freertos/FreeRTOS.h"
@@ -13,6 +14,10 @@
 #include "esp_random.h"
 #include "esp_err.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
+#include "esp_sleep.h"
+#include "esp_timer.h"
+#include "driver/rtc_io.h"
 #include <esp_system.h>
 
 //Biblioteca criada
@@ -38,6 +43,15 @@
 #if defined(CONFIG_EXAMPLE_TYPE_SI7021)
 #define SENSOR_TYPE DHT_TYPE_SI7021
 #endif
+
+#define BOTAO 0
+#define TIME_SLEEPING 5 // TEMPO EM SEGUNGOS
+#define TIME_TO_UPDATE_MQTT_DATA 20000 // TEMPO EM MILISEGUNDOS
+
+/*Prototipo de Metodos Auxiliares*/
+void button_check();      
+void config_sleep_and_button();
+int64_t start_sleep();
 
 QueueHandle_t queueTemperatura;
 QueueHandle_t queueUmidade;
@@ -132,66 +146,98 @@ void mqtt_task(void *pvParameters)
     }
     ESP_ERROR_CHECK(ret);
 
-    wifi_init_sta();    //Inicializando o WiFi. Função da Lib criada, wifi.h
-    ESP_LOGI(TAG, "WiFi foi inicializado!");
+    // CONFIGURA O MODO LIGTH SLEEP E O BUTAO DE INTERRUPCAO
+    config_sleep_and_button();
+    int64_t sleep_time_total = 0;
+    
+    while(true)
+    {
+        // VERIFICA BOTAO
+        button_check();
+        // COMECA A DORMIR E CONTA O TEMPO DE SONO EM MS MILISEGUNDOS
+        sleep_time_total += start_sleep();
 
-    mqtt_start();       //Iniciando conexão MQTT. Função da Lib criada, MQTT.h
-    ESP_LOGI(TAG, "MQTT foi inicializado!");
+        // GERENCIA O WAKE UP
 
-   while(1){
-        // INICIA A ESTRUTA QUE JUNTA OS DADOS
-        struct Dados pacote = {NULL, 0.0, 0.0, 0.0};
+        // Pega a causa
+        esp_sleep_wakeup_cause_t causa = esp_sleep_get_wakeup_cause();
 
-       if(mqtt_connected()){
+        if (causa == ESP_SLEEP_WAKEUP_TIMER){
+            printf("FAZ A MEDIDA E SALVA LOCAL\n");   
+        }else{
+            printf("SOBE O SERVIDOR HTTP\n");
+        }
+
+        printf("Sono total %lld ms\n", sleep_time_total);
+        if (sleep_time_total >= TIME_TO_UPDATE_MQTT_DATA){
+            printf("MANDA PRA O MQTT \n");
+            sleep_time_total = 0;
             
-            // ATUALIZA STATUS
-            mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
+            wifi_init_sta();    //Inicializando o WiFi. Função da Lib criada, wifi.h
+            ESP_LOGI(TAG, "WiFi foi inicializado!");
 
-            // Espera receber um valor da fila de Temperatura
-            float received_temperatura;
-            if (xQueueReceive(queueTemperatura, &received_temperatura, portMAX_DELAY) == pdTRUE) {
-                ESP_LOGI(TAG_TEMPERATURA, "Recebido da fila temp: %.2f",  received_temperatura);
-                pacote.temperatura = received_temperatura;   
+            mqtt_start();       //Iniciando conexão MQTT. Função da Lib criada, MQTT.h
+            ESP_LOGI(TAG, "MQTT foi inicializado!");
+            bool continue_wainting_sensors = true;
+            while(continue_wainting_sensors){
+                // INICIA A ESTRUTA QUE JUNTA OS DADOS
+                struct Dados pacote = {NULL, 0.0, 0.0, 0.0};
+
+                if(mqtt_connected()){
+                    // ATUALIZA STATUS
+                    mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
+
+                    // Espera receber um valor da fila de Temperatura
+                    float received_temperatura;
+                    if (xQueueReceive(queueTemperatura, &received_temperatura, portMAX_DELAY) == pdTRUE) {
+                        ESP_LOGI(TAG_TEMPERATURA, "Recebido da fila temp: %.2f",  received_temperatura);
+                        pacote.temperatura = received_temperatura;   
+                    }
+                    float received_umidade;
+                    if (xQueueReceive(queueUmidade, &received_umidade, portMAX_DELAY) == pdTRUE) {
+                        pacote.umidade = received_umidade;   
+                    }
+                    uint32_t received_pressao;
+                    if (xQueueReceive(queuePressao, &received_pressao, portMAX_DELAY) == pdTRUE) {
+                        pacote.pressao = received_pressao;   
+                    }
+                    
+                    //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
+                    if (pacote.temperatura != 0.0 && pacote.umidade != 0.0 && pacote.pressao != 0.0)
+                    {
+
+                        ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
+
+                        char json_string[50];
+                        sprintf(
+                            json_string, 
+                            "{Temp: %.2f °C, Umi: %.2f, Press: %"PRIu32" Pa}", 
+                            pacote.temperatura, pacote.umidade, pacote.pressao
+                        );        
+
+                        mqtt_publish("ELE0629/Weather/Data", json_string, 0, 0);
+
+                        // RESETA OS VALORES DO STRUT
+                        pacote.texto = NULL;
+                        pacote.temperatura = 0.0;
+                        pacote.umidade = 0.0;
+                        pacote.pressao = 0.0;
+
+                        continue_wainting_sensors = false;
+                        break;
+                    }
+                    
+                    // printf("CONECTOU O MQTT !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+                    // continue_wainting_sensors = false;
+                    // break;
+                }
+                vTaskDelay(4000/portTICK_PERIOD_MS);
             }
-
-            float received_umidade;
-            if (xQueueReceive(queueUmidade, &received_umidade, portMAX_DELAY) == pdTRUE) {
-                pacote.umidade = received_umidade;   
-            }
-
-            uint32_t received_pressao;
-            if (xQueueReceive(queuePressao, &received_pressao, portMAX_DELAY) == pdTRUE) {
-                pacote.pressao = received_pressao;   
-            }
-
-            
-            //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
-            if (pacote.temperatura != 0.0 && pacote.umidade != 0.0 && pacote.pressao != 0.0)
-            {
-
-                ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
-
-                char json_string[50];
-                sprintf(
-                    json_string, 
-                    "{Temp: %.2f °C, Umi: %.2f, Press: %"PRIu32" Pa}", 
-                    pacote.temperatura, pacote.umidade, pacote.pressao
-                );        
-
-                mqtt_publish("ELE0629/Weather/Data", json_string, 0, 0);
-
-                // RESETA OS VALORES DO STRUT
-                pacote.texto = NULL;
-                pacote.temperatura = 0.0;
-                pacote.umidade = 0.0;
-                pacote.pressao = 0.0;
-
-            }
-       }
-
-
-       vTaskDelay(4000/portTICK_PERIOD_MS);
-   }
+            // TODO > DESLIGAR A CONECTIVIDADE
+            wifi_disconnect();
+            printf("SAIU DO WHILE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+        }
+    }
 }
 
 void app_main(void)
@@ -199,9 +245,58 @@ void app_main(void)
     // task
     ESP_ERROR_CHECK(i2cdev_init());
 
-    xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-    xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL, APP_CPU_NUM);
+    // xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+    // xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL, APP_CPU_NUM);
+    // TODO > COLOCAR A TAREFA DE CONECTIVIDADE PARA OUTRO CORE
     xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
 
     vTaskDelay(5000/portTICK_PERIOD_MS);
+}
+
+void button_check(){
+    if (rtc_gpio_get_level(BOTAO) == 0)
+    {
+        // printf("Aguardando soltar o botão ... \n");
+        do
+        {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } while (rtc_gpio_get_level(BOTAO) == 0);
+    }
+}
+
+void config_sleep_and_button(){
+    // Configuração do pino como entrada
+    gpio_config_t config = {
+        .pin_bit_mask = BIT64(BOTAO),               //gpio pin to use for wakeup
+        .mode = GPIO_MODE_INPUT,                    //set gpio pin to input mode
+        .pull_down_en = false,                      //disable pull down resistor
+        .pull_up_en = false,                        //disable pull up resistor
+        .intr_type = GPIO_INTR_DISABLE              //disable interrupt
+    };
+    gpio_config(&config);
+    gpio_wakeup_enable(BOTAO, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    // Configurando o Sleep Timer (em microsegundos)
+    // uint64_t tempo_sono = 2 * (60 * 1000000); // VALOR * (1 MINUTO)
+    uint64_t tempo_sono = (TIME_SLEEPING * 1000000); // VALOR * (1 MINUTO)
+    esp_sleep_enable_timer_wakeup(tempo_sono);
+}
+
+int64_t start_sleep() {
+    printf("Entrando em modo Light Sleep\n");
+    
+    // Configura o modo sleep somente após completar a escrita na UART para finalizar o printf
+    uart_wait_tx_idle_polling(CONFIG_ESP_CONSOLE_UART_NUM);
+
+    int64_t tempo_antes_de_dormir = esp_timer_get_time();
+    // Entra em modo Light Sleep
+    esp_light_sleep_start();
+    int64_t tempo_apos_acordar = esp_timer_get_time();
+    
+    int64_t sleep_time_ms = 0;
+    sleep_time_ms = (tempo_apos_acordar - tempo_antes_de_dormir) / 1000;
+    
+    printf("Dormiu por %lld ms\n", sleep_time_ms);
+    return sleep_time_ms;
 }
