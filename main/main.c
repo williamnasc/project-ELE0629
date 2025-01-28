@@ -73,6 +73,26 @@ static void salvar_dados_spiffs(float temperatura, float umidade, uint32_t press
     ESP_LOGI(TAG_SPIFFS, "Dados salvos no SPIFFS: Temp=%.2f°C, Umid=%.2f%%, Press= %" PRIu32 " Pa", temperatura, umidade, pressao);
 }
 
+// Ler dados do SPIFFS
+static void ler_dados_spiffs() {
+    FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "r");
+    if (arquivo == NULL) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para leitura!");
+        return;
+    }
+
+    char linha[128];
+    int contador = 0;
+
+    ESP_LOGI(TAG_SPIFFS, "Lendo dados do arquivo SPIFFS:");
+    while (fgets(linha, sizeof(linha), arquivo) != NULL) {
+        printf("Leitura %d: %s", ++contador, linha);
+    }
+    fclose(arquivo);
+
+    ESP_LOGI(TAG_SPIFFS, "Total de leituras realizadas: %d", contador);
+}
+
 // Tarefa para leitura do DHT11
 void dht_task(void *pvParameters) {
     float temperatura, umidade;
@@ -98,36 +118,33 @@ void dht_task(void *pvParameters) {
 }
 
 // Tarefa para leitura do BMP180
-void pressao_task(void *pvParameters)
-{
+void pressao_task(void *pvParameters) {
     bmp180_dev_t dev;
     memset(&dev, 0, sizeof(bmp180_dev_t));
 
     ESP_ERROR_CHECK(bmp180_init_desc(&dev, 0, CONFIG_EXAMPLE_I2C_MASTER_SDA, CONFIG_EXAMPLE_I2C_MASTER_SCL));
     ESP_ERROR_CHECK(bmp180_init(&dev));
 
-    //inicia a fila que salva os valores de temperatura
     queuePressao = xQueueCreate(1, sizeof(uint32_t));
 
-    while (1) 
-    {
+    while (1) {
         float temp;
-        uint32_t pressure;
+        uint32_t pressao;
 
-        bmp180_measure(&dev, &temp, &pressure, BMP180_MODE_STANDARD);
+        bmp180_measure(&dev, &temp, &pressao, BMP180_MODE_STANDARD);
 
-        if (xQueueSend(queuePressao, &pressure, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG_PRESSAO, "Enviado para a fila: %"PRIu32"", pressure);
+        if (xQueueSend(queuePressao, &pressao, portMAX_DELAY) == pdPASS) {
+            ESP_LOGI(TAG_PRESSAO, "Pressão enviada para fila: %" PRIu32 " Pa", pressao);
         } else {
-            ESP_LOGE(TAG_PRESSAO, "Falha ao enviar para a fila");
+            ESP_LOGE(TAG_PRESSAO, "Falha ao enviar pressão para fila!");
         }
-
-        vTaskDelay(pdMS_TO_TICKS(4000)); 
+        vTaskDelay(pdMS_TO_TICKS(4000));
     }
 }
 
 // Tarefa para salvar e enviar dados
 void mqtt_spiffs_task(void *pvParameters) {
+    
     float temperatura, umidade;
     uint32_t pressao;
 
@@ -148,6 +165,7 @@ void mqtt_spiffs_task(void *pvParameters) {
             
             // Salvar dados no SPIFFS
             salvar_dados_spiffs(temperatura, umidade, pressao);
+            //ler_dados_spiffs();
 
             // Enviar dados via MQTT
             if (mqtt_connected()) {
@@ -167,6 +185,15 @@ void mqtt_spiffs_task(void *pvParameters) {
     }
 }
 
+// Tarefa para ler dados salvos no SPIFFS
+//void spiffs_read_task(void *pvParameters) {
+    //while (1) {
+        //ler_dados_spiffs();
+        //vTaskDelay(pdMS_TO_TICKS(100000));
+    //}
+//}
+
+
 // Função principal
 void app_main(void) {
     // Inicializar SPIFFS
@@ -178,4 +205,5 @@ void app_main(void) {
     xTaskCreate(dht_task, "dht_task", 2048, NULL, 5, NULL);
     xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL, APP_CPU_NUM);
     xTaskCreate(mqtt_spiffs_task, "mqtt_spiffs_task", 4096, NULL, 5, NULL);
+    ler_dados_spiffs();
 }
