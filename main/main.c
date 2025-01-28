@@ -1,207 +1,56 @@
 #include <stdio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <ds3231.h>
 #include <string.h>
-#include <inttypes.h>
 
-//Includes FreeRTOS
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-
-//Includes ESP-IDF
-#include "esp_log.h"
-#include "nvs_flash.h"
-#include "esp_random.h"
-#include "esp_err.h"
-#include "driver/gpio.h"
-#include <esp_system.h>
-
-//Biblioteca criada
-#include "wifi.h"
-#include "MQTT_lib.h"
-
-//Bibliotecas externas
-#include <bmp180.h>
-#include <dht.h>
-
-//Configuração do bmp180
-#ifndef APP_CPU_NUM
-#define APP_CPU_NUM PRO_CPU_NUM
-#endif
-
-//Configuração do dht11 (tipo do sensor)
-#if defined(CONFIG_EXAMPLE_TYPE_DHT11)
-#define SENSOR_TYPE DHT_TYPE_DHT11
-#endif
-#if defined(CONFIG_EXAMPLE_TYPE_AM2301)
-#define SENSOR_TYPE DHT_TYPE_AM2301
-#endif
-#if defined(CONFIG_EXAMPLE_TYPE_SI7021)
-#define SENSOR_TYPE DHT_TYPE_SI7021
-#endif
-
-QueueHandle_t queueTemperatura;
-QueueHandle_t queueUmidade;
-QueueHandle_t queuePressao;
-
-static const char *TAG = "MQTT Task";
-static const char *TAG_TEMPERATURA = "Temperatura Task";
-static const char *TAG_UMIDADE = "Umidade Task";
-static const char *TAG_PRESSAO = "Pressao Task";
-
-// Definição do struct 
-struct Dados { 
-    char *texto; 
-    float temperatura;
-    float umidade; 
-    uint32_t pressao; 
-};
-
-void dht11_task(void *pvParameters)
+void ds3231_test(void *pvParameters)
 {
-    float temperatura, umidade;
-    //Configuração do dht11 (pullup interno)
-    #ifdef CONFIG_EXAMPLE_INTERNAL_PULLUP
-        gpio_set_pull_mode(CONFIG_EXAMPLE_DATA_GPIO, GPIO_PULLUP_ONLY);
-    #endif
-    
-    //inicia a fila que salva os valores de temperatura
-    queueTemperatura = xQueueCreate(1, sizeof(float));
-    queueUmidade = xQueueCreate(1, sizeof(float));
-    
+    i2c_dev_t dev;
+    memset(&dev, 0, sizeof(i2c_dev_t));
+
+    ESP_ERROR_CHECK(ds3231_init_desc(&dev, 0, GPIO_NUM_18, GPIO_NUM_19));
+
+    struct tm time = {
+        .tm_year = 125, //since 1900 (2025 - 1900)
+        .tm_mon  = 0,  // 0-based
+        .tm_mday = 27,
+        .tm_hour = 21,
+        .tm_min  = 38,
+        .tm_sec  = 10
+    };
+    ESP_ERROR_CHECK(ds3231_set_time(&dev, &time));
+
     while (1)
     {
-          
-        if (dht_read_float_data(SENSOR_TYPE, CONFIG_EXAMPLE_DATA_GPIO, &umidade, &temperatura) == ESP_OK)
-        {
-            ESP_LOGI(TAG_TEMPERATURA, "Temperatura: %.2f C", temperatura);
-            if (xQueueSend(queueTemperatura, &temperatura, portMAX_DELAY) != pdPASS)
-            {
-                ESP_LOGE(TAG_TEMPERATURA, "Falha ao enviar temperatura para a fila");
-            }
-            ESP_LOGI(TAG_UMIDADE, "Umidade: %.2f", umidade);
-            if (xQueueSend(queueUmidade, &umidade, portMAX_DELAY) != pdPASS)
-            {
-                ESP_LOGE(TAG_UMIDADE, "Falha ao enviar umidade para a fila");
-            }
-        }
-        else
-        {
-            ESP_LOGE(TAG_TEMPERATURA, "Falha ao ler sensor DHT11");
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(2000));  // Aguarda 2 segundos
-    }
-}
-
-void pressao_task(void *pvParameters)
-{
-    bmp180_dev_t dev;
-    memset(&dev, 0, sizeof(bmp180_dev_t));
-
-    ESP_ERROR_CHECK(bmp180_init_desc(&dev, 0, CONFIG_EXAMPLE_I2C_MASTER_SDA, CONFIG_EXAMPLE_I2C_MASTER_SCL));
-    ESP_ERROR_CHECK(bmp180_init(&dev));
-
-    //inicia a fila que salva os valores de temperatura
-    queuePressao = xQueueCreate(1, sizeof(uint32_t));
-    
-
-    while (1) 
-    {
         float temp;
-        uint32_t pressure;
 
-        bmp180_measure(&dev, &temp, &pressure, BMP180_MODE_STANDARD);
+        vTaskDelay(pdMS_TO_TICKS(250));
 
-        if (xQueueSend(queuePressao, &pressure, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG_PRESSAO, "Enviado para a fila: %"PRIu32"", pressure);
-        } else {
-            ESP_LOGE(TAG_PRESSAO, "Falha ao enviar para a fila");
+        if (ds3231_get_temp_float(&dev, &temp) != ESP_OK)
+        {
+            printf("Could not get temperature\n");
+            continue;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(2000));  // Aguarda 1 segundo
+        if (ds3231_get_time(&dev, &time) != ESP_OK)
+        {
+            printf("Could not get time\n");
+            continue;
+        }
+
+        /* float is used in printf(). you need non-default configuration in
+         * sdkconfig for ESP8266, which is enabled by default for this
+         * example. see sdkconfig.defaults.esp8266
+         */
+        printf("%04d-%02d-%02d %02d:%02d:%02d\n", time.tm_year + 1900 /*Add 1900 for better readability*/, time.tm_mon + 1,
+            time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
     }
 }
 
-void mqtt_task(void *pvParameters)
+void app_main()
 {
-    // Inicializando NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    wifi_init_sta();    //Inicializando o WiFi. Função da Lib criada, wifi.h
-    ESP_LOGI(TAG, "WiFi foi inicializado!");
-
-    mqtt_start();       //Iniciando conexão MQTT. Função da Lib criada, MQTT.h
-    ESP_LOGI(TAG, "MQTT foi inicializado!");
-
-   while(1){
-        // INICIA A ESTRUTA QUE JUNTA OS DADOS
-        struct Dados pacote = {NULL, 0.0, 0.0, 0.0};
-
-       if(mqtt_connected()){
-            
-            // ATUALIZA STATUS
-            mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
-
-            // Espera receber um valor da fila de Temperatura
-            float received_temperatura;
-            if (xQueueReceive(queueTemperatura, &received_temperatura, portMAX_DELAY) == pdTRUE) {
-                ESP_LOGI(TAG_TEMPERATURA, "Recebido da fila temp: %.2f",  received_temperatura);
-                pacote.temperatura = received_temperatura;   
-            }
-
-            float received_umidade;
-            if (xQueueReceive(queueUmidade, &received_umidade, portMAX_DELAY) == pdTRUE) {
-                pacote.umidade = received_umidade;   
-            }
-
-            uint32_t received_pressao;
-            if (xQueueReceive(queuePressao, &received_pressao, portMAX_DELAY) == pdTRUE) {
-                pacote.pressao = received_pressao;   
-            }
-
-            
-            //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
-            if (pacote.temperatura != 0.0 && pacote.umidade != 0.0 && pacote.pressao != 0.0)
-            {
-
-                ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
-
-                char json_string[50];
-                sprintf(
-                    json_string, 
-                    "{Temp: %.2f °C, Umi: %.2f, Press: %"PRIu32" Pa}", 
-                    pacote.temperatura, pacote.umidade, pacote.pressao
-                );        
-
-                mqtt_publish("ELE0629/Weather/Data", json_string, 0, 0);
-
-                // RESETA OS VALORES DO STRUT
-                pacote.texto = NULL;
-                pacote.temperatura = 0.0;
-                pacote.umidade = 0.0;
-                pacote.pressao = 0.0;
-
-            }
-       }
-
-
-       vTaskDelay(4000/portTICK_PERIOD_MS);
-   }
-}
-
-void app_main(void)
-{
-    // task
     ESP_ERROR_CHECK(i2cdev_init());
-
-    xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-    xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL, APP_CPU_NUM);
-    xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-
-    vTaskDelay(5000/portTICK_PERIOD_MS);
+    xTaskCreate(ds3231_test, "ds3231_test", configMINIMAL_STACK_SIZE * 3, NULL, 5, NULL);
 }
+
