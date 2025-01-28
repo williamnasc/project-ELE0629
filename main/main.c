@@ -19,30 +19,22 @@
 #include "wifi.h"
 #include "MQTT_lib.h"
 
-// DHT e BMP180
+// DHT
 #include <dht.h>
-#include <bmp180.h>
 
-// Configurações do DHT
+// Configuração do DHT
 #if defined(CONFIG_EXAMPLE_TYPE_DHT11)
 #define SENSOR_TYPE DHT_TYPE_DHT11
-#endif
-
-// Configurações do BMP180
-#ifndef APP_CPU_NUM
-#define APP_CPU_NUM PRO_CPU_NUM
 #endif
 
 // Tags para logging
 static const char *TAG_SPIFFS = "SPIFFS";
 static const char *TAG_MQTT = "MQTT";
 static const char *TAG_DHT = "DHT";
-static const char *TAG_PRESSAO = "BMP180";
 
-// Filas para comunicação entre tarefas
+// Fila para comunicação entre tarefas
 static QueueHandle_t queueTemperatura;
 static QueueHandle_t queueUmidade;
-static QueueHandle_t queuePressao;
 
 // Inicialização do SPIFFS
 static esp_err_t init_spiffs() {
@@ -61,16 +53,36 @@ static esp_err_t init_spiffs() {
 }
 
 // Salvar dados no SPIFFS
-static void salvar_dados_spiffs(float temperatura, float umidade, uint32_t pressao) {
+static void salvar_dados_spiffs(float temperatura, float umidade) {
     FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "a");
     if (arquivo == NULL) {
         ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para escrita!");
         return;
     }
 
-    fprintf(arquivo, "%.2f,%.2f,%" PRIu32 "\n", temperatura, umidade, pressao);
+    fprintf(arquivo, "%.2f,%.2f\n", temperatura, umidade);
     fclose(arquivo);
-    ESP_LOGI(TAG_SPIFFS, "Dados salvos no SPIFFS: Temp=%.2f°C, Umid=%.2f%%, Press= %" PRIu32 " Pa", temperatura, umidade, pressao);
+    ESP_LOGI(TAG_SPIFFS, "Dados salvos no SPIFFS: Temp=%.2f°C, Umid=%.2f%%", temperatura, umidade);
+}
+
+// Ler dados do SPIFFS e contar leituras
+static void ler_dados_spiffs() {
+    FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "r");
+    if (arquivo == NULL) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para leitura!");
+        return;
+    }
+
+    ESP_LOGI(TAG_SPIFFS, "Lendo conteúdo do arquivo:");
+    char linha[128];
+    int contador = 0;
+
+    while (fgets(linha, sizeof(linha), arquivo) != NULL) {
+        printf("Leitura %d: %s", ++contador, linha);
+    }
+    fclose(arquivo);
+
+    ESP_LOGI(TAG_SPIFFS, "Total de leituras realizadas: %d", contador);
 }
 
 // Tarefa para leitura do DHT11
@@ -97,39 +109,9 @@ void dht_task(void *pvParameters) {
     }
 }
 
-// Tarefa para leitura do BMP180
-void pressao_task(void *pvParameters)
-{
-    bmp180_dev_t dev;
-    memset(&dev, 0, sizeof(bmp180_dev_t));
-
-    ESP_ERROR_CHECK(bmp180_init_desc(&dev, 0, CONFIG_EXAMPLE_I2C_MASTER_SDA, CONFIG_EXAMPLE_I2C_MASTER_SCL));
-    ESP_ERROR_CHECK(bmp180_init(&dev));
-
-    //inicia a fila que salva os valores de temperatura
-    queuePressao = xQueueCreate(1, sizeof(uint32_t));
-
-    while (1) 
-    {
-        float temp;
-        uint32_t pressure;
-
-        bmp180_measure(&dev, &temp, &pressure, BMP180_MODE_STANDARD);
-
-        if (xQueueSend(queuePressao, &pressure, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG_PRESSAO, "Enviado para a fila: %"PRIu32"", pressure);
-        } else {
-            ESP_LOGE(TAG_PRESSAO, "Falha ao enviar para a fila");
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(4000)); 
-    }
-}
-
 // Tarefa para salvar e enviar dados
 void mqtt_spiffs_task(void *pvParameters) {
     float temperatura, umidade;
-    uint32_t pressao;
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -143,27 +125,32 @@ void mqtt_spiffs_task(void *pvParameters) {
 
     while (1) {
         if (xQueueReceive(queueTemperatura, &temperatura, portMAX_DELAY) &&
-            xQueueReceive(queueUmidade, &umidade, portMAX_DELAY) &&
-            xQueueReceive(queuePressao, &pressao, portMAX_DELAY)) {
+            xQueueReceive(queueUmidade, &umidade, portMAX_DELAY)) {
             
             // Salvar dados no SPIFFS
-            salvar_dados_spiffs(temperatura, umidade, pressao);
+            salvar_dados_spiffs(temperatura, umidade);
 
             // Enviar dados via MQTT
             if (mqtt_connected()) {
-                char msg_temp[50], msg_umid[50], msg_press[50];
+                char msg_temp[50], msg_umid[50];
                 snprintf(msg_temp, sizeof(msg_temp), "Temp: %.2f °C", temperatura);
                 snprintf(msg_umid, sizeof(msg_umid), "Umid: %.2f %%", umidade);
-                snprintf(msg_press, sizeof(msg_press), "Press: %" PRIu32 " Pa", pressao);
 
                 mqtt_publish("ELE0629/Weather/Temperature", msg_temp, 0, 0);
                 mqtt_publish("ELE0629/Weather/Humidity", msg_umid, 0, 0);
-                mqtt_publish("ELE0629/Weather/Pressure", msg_press, 0, 0);
 
-                ESP_LOGI(TAG_MQTT, "Dados enviados via MQTT: %s, %s, %s", msg_temp, msg_umid, msg_press);
+                ESP_LOGI(TAG_MQTT, "Dados enviados via MQTT: %s, %s", msg_temp, msg_umid);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(4000));
+    }
+}
+
+// Tarefa para ler dados salvos no SPIFFS
+void spiffs_read_task(void *pvParameters) {
+    while (1) {
+        ler_dados_spiffs();
+        vTaskDelay(pdMS_TO_TICKS(100000));
     }
 }
 
@@ -172,10 +159,8 @@ void app_main(void) {
     // Inicializar SPIFFS
     ESP_ERROR_CHECK(init_spiffs());
 
-    ESP_ERROR_CHECK(i2cdev_init());
-
     // Criar tarefas
     xTaskCreate(dht_task, "dht_task", 2048, NULL, 5, NULL);
-    xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL, APP_CPU_NUM);
     xTaskCreate(mqtt_spiffs_task, "mqtt_spiffs_task", 4096, NULL, 5, NULL);
+    xTaskCreate(spiffs_read_task, "spiffs_read_task", 4096, NULL, 5, NULL);
 }
