@@ -54,8 +54,8 @@
 SemaphoreHandle_t semaphore;
 
 #define BOTAO 0
-#define TIME_SLEEPING 5 // TEMPO EM SEGUNGOS
-#define TIME_TO_UPDATE_MQTT_DATA 20000 // TEMPO EM MILISEGUNDOS
+#define TIME_SLEEPING 2 // TEMPO EM SEGUNGOS
+#define TIME_TO_UPDATE_MQTT_DATA 10000 // TEMPO EM MILISEGUNDOS
 
 /*Prototipo de Metodos Auxiliares*/
 void button_check();      
@@ -85,6 +85,36 @@ static esp_err_t init_spiffs() {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG_SPIFFS, "Erro ao inicializar SPIFFS (%s)", esp_err_to_name(ret));
     }
+    
+
+    /***        VERIFICANDO INFORMAÇÕES DO SPIFFS       ***/
+    size_t total = 0;
+    size_t usado = 0;
+
+    ret = esp_spiffs_info(conf.partition_label, &total, &usado);
+
+    if(ret != ESP_OK){
+        ESP_LOGE(TAG_SPIFFS, "Falha ao obter informações da partição SPIFFS: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG_SPIFFS, "Formantando a partição!");
+        esp_spiffs_format(conf.partition_label);
+        return ret;
+    }else{
+        ESP_LOGI(TAG_SPIFFS, "Tamanho total da partição:\n Total: %d\n Usada: %d", total, usado);
+    }
+
+    if(usado > total){
+        ESP_LOGW(TAG_SPIFFS, "Número de bytes utilizados não pode ser maior que o tamanho total da partiação!");
+        ESP_LOGW(TAG_SPIFFS, "Realizando SPIFFS_check()!");
+        ret = esp_spiffs_check(conf.partition_label);
+
+        if(ret != ESP_OK){
+            ESP_LOGE(TAG_SPIFFS, "SPIFFS_check falhou: %s", esp_err_to_name(ret));
+            return ret;
+        } else{
+            ESP_LOGI(TAG_SPIFFS, "SPIFFS_check completado com sucesso!");
+        }
+    }
+
     return ret;
 }
 
@@ -99,6 +129,26 @@ static void salvar_dados_spiffs(float temperatura, float umidade, uint32_t press
     fprintf(arquivo, "%.2f,%.2f,%" PRIu32 "\n", temperatura, umidade, pressao);
     fclose(arquivo);
     ESP_LOGI(TAG_SPIFFS, "Dados salvos no SPIFFS: Temp=%.2f°C, Umid=%.2f%%, Press= %" PRIu32 " Pa", temperatura, umidade, pressao);
+}
+
+// Ler dados do arquivo
+static void ler_dados_spiffs() {
+    FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "r");
+    if (arquivo == NULL) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para leitura!");
+        return;
+    }
+
+    char linha[128];
+    int contador = 0;
+
+    ESP_LOGI(TAG_SPIFFS, "Lendo dados do arquivo SPIFFS:");
+    while (fgets(linha, sizeof( linha), arquivo) != NULL) {
+        printf("Leitura %d: %s", ++contador, linha);
+    }
+    fclose(arquivo);
+
+    ESP_LOGI(TAG_SPIFFS, "Total de leituras realizadas: %d", contador);
 }
 
 // Definição do struct 
@@ -190,7 +240,7 @@ void rtc_task(void *pvParameters)
         .tm_year = 125, //since 1900 (2025 - 1900)
         .tm_mon  = 0,  // 0-based
         .tm_mday = 29,
-        .tm_hour = 11,
+        .tm_hour = 19,
         .tm_min  = 50,
         .tm_sec  = 10
     };
@@ -207,6 +257,7 @@ void rtc_task(void *pvParameters)
 
         printf("%04d-%02d-%02d %02d:%02d:%02d\n", time.tm_year + 1900 /*Add 1900 for better readability*/, time.tm_mon + 1,
             time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 
@@ -229,19 +280,10 @@ void save_spiffs_task(void *pvParameters) {
         {
             // Salvar dados no SPIFFS
             salvar_dados_spiffs(temperatura, umidade, pressao);
-
+            xSemaphoreGive(semaphore);
         } else {
             ESP_LOGE(TAG_SPIFFS, "Falha ao receber dados da fila.");
         }
-
-        // Aguarda um tempo antes de repetir a operação
-        vTaskDelay(pdMS_TO_TICKS(6000));
-
-        // Libera o semáforo para sincronizar com a main
-        xSemaphoreGive(semaphore);
-
-        // Aguarda mais um tempo antes de continuar
-        vTaskDelay(pdMS_TO_TICKS(6000));
     }
 }
 
@@ -308,7 +350,7 @@ void mqtt_task(void *pvParameters)
 
                 // LIBERA A TAREFA MAIN
                 xSemaphoreGive(semaphore);
-                printf("LIBERADO !!!!!");
+                printf("LIBERADO !!!!!\n");
             }
         }
         vTaskDelay(4000/portTICK_PERIOD_MS);
@@ -352,7 +394,7 @@ void app_main(void)
             xTaskCreate(rtc_task, "rtc_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &rtc_taskHandle);
         }else{
             vTaskResume(rtc_taskHandle);
-        }        
+        }
 
         // ATUA DE ACORDO COM A CAUSA DO WAKE UP
         if (causa == ESP_SLEEP_WAKEUP_TIMER){
@@ -410,6 +452,7 @@ void app_main(void)
             // DELETA TAREFA PELO HANDLE
             // if( mqtt_taskHandle != NULL ){ vTaskDelete( mqtt_taskHandle ); }
             vTaskSuspend(mqtt_taskHandle);
+
             esp_restart();
         }
 
