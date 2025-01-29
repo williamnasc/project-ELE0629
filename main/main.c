@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 //Includes ESP-IDF
 #include "esp_log.h"
@@ -44,6 +45,8 @@
 #define SENSOR_TYPE DHT_TYPE_SI7021
 #endif
 
+SemaphoreHandle_t semaphore;
+
 #define BOTAO 0
 #define TIME_SLEEPING 5 // TEMPO EM SEGUNGOS
 #define TIME_TO_UPDATE_MQTT_DATA 20000 // TEMPO EM MILISEGUNDOS
@@ -70,6 +73,7 @@ struct Dados {
     uint32_t pressao; 
 };
 
+TaskHandle_t dht11_taskHandle = NULL;
 void dht11_task(void *pvParameters)
 {
     float temperatura, umidade;
@@ -107,6 +111,7 @@ void dht11_task(void *pvParameters)
     }
 }
 
+TaskHandle_t pressao_taskHandle = NULL;
 void pressao_task(void *pvParameters)
 {
     bmp180_dev_t dev;
@@ -136,6 +141,18 @@ void pressao_task(void *pvParameters)
     }
 }
 
+TaskHandle_t save_spiffs_taskHandle = NULL;
+void save_spiffs_task(void *pvParameters){
+    // IMPLEMENTAR
+    while (true)
+    {
+        vTaskDelay(6000/portTICK_PERIOD_MS);
+        xSemaphoreGive(semaphore);
+        vTaskDelay(6000/portTICK_PERIOD_MS);
+    }
+}
+
+TaskHandle_t mqtt_taskHandle = NULL;
 void mqtt_task(void *pvParameters)
 {
     // Inicializando NVS
@@ -156,7 +173,7 @@ void mqtt_task(void *pvParameters)
         // INICIA A ESTRUTA QUE JUNTA OS DADOS
         struct Dados pacote = {NULL, 0.0, 0.0, 0.0};
 
-        if(mqtt_connected()){
+        if(mqtt_connected()){            
             // ATUALIZA STATUS
             mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
 
@@ -195,6 +212,10 @@ void mqtt_task(void *pvParameters)
                 pacote.temperatura = 0.0;
                 pacote.umidade = 0.0;
                 pacote.pressao = 0.0;
+
+                // LIBERA A TAREFA MAIN
+                xSemaphoreGive(semaphore);
+                printf("LIBERADO !!!!!");
             }
         }
         vTaskDelay(4000/portTICK_PERIOD_MS);
@@ -206,12 +227,96 @@ void app_main(void)
     // task
     ESP_ERROR_CHECK(i2cdev_init());
 
-    // xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-    // xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL, APP_CPU_NUM);
-    // TODO > COLOCAR A TAREFA DE CONECTIVIDADE PARA OUTRO CORE
-    xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+    config_sleep_and_button();
+    int64_t sleep_time_total = 0;
+    
+    while (true)
+    {
+        // SEMPRE RESETA O SEMAFORO
+        semaphore = xSemaphoreCreateCounting( 1, 0 );
 
-    vTaskDelay(5000/portTICK_PERIOD_MS);
+        // VERIFICA BOTAO
+        button_check();
+        // COMECA A DORMIR E CONTA O TEMPO DE SONO EM MS MILISEGUNDOS
+        sleep_time_total += start_sleep();
+        // Pega a causa
+        esp_sleep_wakeup_cause_t causa = esp_sleep_get_wakeup_cause();
+
+        // CRIA OU ATIVA AS TAREFAS DOS SENSORES
+        if (dht11_taskHandle == NULL){
+            xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &dht11_taskHandle);
+        }else{
+            vTaskResume(dht11_taskHandle);
+        }
+        if (pressao_taskHandle == NULL){
+            xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &pressao_taskHandle, APP_CPU_NUM);
+        }else{
+            vTaskResume(pressao_taskHandle);
+        }
+
+        // ATUA DE ACORDO COM A CAUSA DO WAKE UP
+        if (causa == ESP_SLEEP_WAKEUP_TIMER){
+            printf("FAZ A MEDIDA E SALVA LOCAL\n");
+
+            if (save_spiffs_taskHandle == NULL){
+                xTaskCreate(save_spiffs_task, "save_spiffs_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &save_spiffs_taskHandle);
+            }else{
+                vTaskResume(save_spiffs_taskHandle);
+            }
+
+            while (true)
+            {
+                // FICA AQUI ENQUANTO N ENVIAR OS DADOS
+                vTaskDelay(5000/portTICK_PERIOD_MS);
+                // LIBERA SE ALGUEM TIVER ADICIONADO AO SEMAFORO
+                if (uxSemaphoreGetCount(semaphore) >= 1){
+                    xSemaphoreTake(semaphore, portMAX_DELAY);
+                    printf("ACABOU !!!!!\n");
+                    break;    
+                }
+                printf("ESPERANDO !!!!!\n");
+            }
+            // SUSPENDE A TAREFA
+            vTaskSuspend(save_spiffs_taskHandle);
+        }else{
+            printf("SOBE O SERVIDOR HTTP\n");
+        }
+
+        printf("Sono total %lld ms\n", sleep_time_total);
+        if (sleep_time_total >= TIME_TO_UPDATE_MQTT_DATA){
+            printf("MANDA PRA O MQTT \n");
+            sleep_time_total = 0;
+            
+            if (mqtt_taskHandle == NULL){
+                xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &mqtt_taskHandle);
+            }else{
+                vTaskResume(mqtt_taskHandle);
+            }
+            
+            while (true)
+            {
+                // FICA AQUI ENQUANTO N ENVIAR OS DADOS
+                vTaskDelay(5000/portTICK_PERIOD_MS);
+                
+                // LIBERA SE ALGUEM TIVER ADICIONADO AO SEMAFORO
+                if (uxSemaphoreGetCount(semaphore) >= 1){
+                    xSemaphoreTake(semaphore, portMAX_DELAY);
+                    printf("ACABOU !!!!!\n");
+                    break;    
+                }
+                printf("ESPERANDO MQTT!!!!!\n");   
+            }
+            // SE ENVIAR, DELETA A TAREFA E SAI VOLTA A DORMIR
+            // DELETA TAREFA PELO HANDLE
+            // if( mqtt_taskHandle != NULL ){ vTaskDelete( mqtt_taskHandle ); }
+            vTaskSuspend(mqtt_taskHandle);
+            esp_restart();
+        }
+
+        // SUSPENDE AS TAREFAS DOS SENSORES
+        vTaskSuspend(pressao_taskHandle);
+        vTaskSuspend(dht11_taskHandle);
+    }
 }
 
 void button_check(){
