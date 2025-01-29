@@ -145,98 +145,59 @@ void mqtt_task(void *pvParameters)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-
-    // CONFIGURA O MODO LIGTH SLEEP E O BUTAO DE INTERRUPCAO
-    config_sleep_and_button();
-    int64_t sleep_time_total = 0;
     
-    while(true)
-    {
-        // VERIFICA BOTAO
-        button_check();
-        // COMECA A DORMIR E CONTA O TEMPO DE SONO EM MS MILISEGUNDOS
-        sleep_time_total += start_sleep();
+    wifi_init_sta();    //Inicializando o WiFi. Função da Lib criada, wifi.h
+    ESP_LOGI(TAG, "WiFi foi inicializado!");
 
-        // GERENCIA O WAKE UP
+    mqtt_start();       //Iniciando conexão MQTT. Função da Lib criada, MQTT.h
+    ESP_LOGI(TAG, "MQTT foi inicializado!");
+    
+    while(true){
+        // INICIA A ESTRUTA QUE JUNTA OS DADOS
+        struct Dados pacote = {NULL, 0.0, 0.0, 0.0};
 
-        // Pega a causa
-        esp_sleep_wakeup_cause_t causa = esp_sleep_get_wakeup_cause();
+        if(mqtt_connected()){
+            // ATUALIZA STATUS
+            mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
 
-        if (causa == ESP_SLEEP_WAKEUP_TIMER){
-            printf("FAZ A MEDIDA E SALVA LOCAL\n");   
-        }else{
-            printf("SOBE O SERVIDOR HTTP\n");
-        }
-
-        printf("Sono total %lld ms\n", sleep_time_total);
-        if (sleep_time_total >= TIME_TO_UPDATE_MQTT_DATA){
-            printf("MANDA PRA O MQTT \n");
-            sleep_time_total = 0;
-            
-            wifi_init_sta();    //Inicializando o WiFi. Função da Lib criada, wifi.h
-            ESP_LOGI(TAG, "WiFi foi inicializado!");
-
-            mqtt_start();       //Iniciando conexão MQTT. Função da Lib criada, MQTT.h
-            ESP_LOGI(TAG, "MQTT foi inicializado!");
-            bool continue_wainting_sensors = true;
-            while(continue_wainting_sensors){
-                // INICIA A ESTRUTA QUE JUNTA OS DADOS
-                struct Dados pacote = {NULL, 0.0, 0.0, 0.0};
-
-                if(mqtt_connected()){
-                    // ATUALIZA STATUS
-                    mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
-
-                    // Espera receber um valor da fila de Temperatura
-                    float received_temperatura;
-                    if (xQueueReceive(queueTemperatura, &received_temperatura, portMAX_DELAY) == pdTRUE) {
-                        ESP_LOGI(TAG_TEMPERATURA, "Recebido da fila temp: %.2f",  received_temperatura);
-                        pacote.temperatura = received_temperatura;   
-                    }
-                    float received_umidade;
-                    if (xQueueReceive(queueUmidade, &received_umidade, portMAX_DELAY) == pdTRUE) {
-                        pacote.umidade = received_umidade;   
-                    }
-                    uint32_t received_pressao;
-                    if (xQueueReceive(queuePressao, &received_pressao, portMAX_DELAY) == pdTRUE) {
-                        pacote.pressao = received_pressao;   
-                    }
-                    
-                    //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
-                    if (pacote.temperatura != 0.0 && pacote.umidade != 0.0 && pacote.pressao != 0.0)
-                    {
-
-                        ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
-
-                        char json_string[50];
-                        sprintf(
-                            json_string, 
-                            "{Temp: %.2f °C, Umi: %.2f, Press: %"PRIu32" Pa}", 
-                            pacote.temperatura, pacote.umidade, pacote.pressao
-                        );        
-
-                        mqtt_publish("ELE0629/Weather/Data", json_string, 0, 0);
-
-                        // RESETA OS VALORES DO STRUT
-                        pacote.texto = NULL;
-                        pacote.temperatura = 0.0;
-                        pacote.umidade = 0.0;
-                        pacote.pressao = 0.0;
-
-                        continue_wainting_sensors = false;
-                        break;
-                    }
-                    
-                    // printf("CONECTOU O MQTT !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-                    // continue_wainting_sensors = false;
-                    // break;
-                }
-                vTaskDelay(4000/portTICK_PERIOD_MS);
+            // Espera receber um valor da fila de Temperatura
+            float received_temperatura;
+            if (xQueueReceive(queueTemperatura, &received_temperatura, portMAX_DELAY) == pdTRUE) {
+                ESP_LOGI(TAG_TEMPERATURA, "Recebido da fila temp: %.2f",  received_temperatura);
+                pacote.temperatura = received_temperatura;   
             }
-            // TODO > DESLIGAR A CONECTIVIDADE
-            wifi_disconnect();
-            printf("SAIU DO WHILE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+            float received_umidade;
+            if (xQueueReceive(queueUmidade, &received_umidade, portMAX_DELAY) == pdTRUE) {
+                pacote.umidade = received_umidade;   
+            }
+            uint32_t received_pressao;
+            if (xQueueReceive(queuePressao, &received_pressao, portMAX_DELAY) == pdTRUE) {
+                pacote.pressao = received_pressao;   
+            }
+            
+            //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
+            if (pacote.temperatura != 0.0 && pacote.umidade != 0.0 && pacote.pressao != 0.0)
+            {
+
+                ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
+
+                char json_string[50];
+                sprintf(
+                    json_string, 
+                    "{Temp: %.2f °C, Umi: %.2f, Press: %"PRIu32" Pa}", 
+                    pacote.temperatura, pacote.umidade, pacote.pressao
+                );        
+
+                mqtt_publish("ELE0629/Weather/Data", json_string, 0, 0);
+
+                // RESETA OS VALORES DO STRUT
+                pacote.texto = NULL;
+                pacote.temperatura = 0.0;
+                pacote.umidade = 0.0;
+                pacote.pressao = 0.0;
+            }
         }
+        vTaskDelay(4000/portTICK_PERIOD_MS);
     }
 }
 
