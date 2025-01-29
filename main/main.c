@@ -12,6 +12,9 @@
 // SPIFFS
 #include "esp_spiffs.h"
 
+//RTC
+#include <ds3231.h>
+
 //Includes ESP-IDF
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -174,6 +177,39 @@ void pressao_task(void *pvParameters)
     }
 }
 
+
+TaskHandle_t rtc_taskHandle = NULL;
+void rtc_task(void *pvParameters)
+{
+    i2c_dev_t dev;
+    memset(&dev, 0, sizeof(i2c_dev_t));
+
+    ESP_ERROR_CHECK(ds3231_init_desc(&dev, 0, GPIO_NUM_18, GPIO_NUM_19));
+
+    struct tm time = {
+        .tm_year = 125, //since 1900 (2025 - 1900)
+        .tm_mon  = 0,  // 0-based
+        .tm_mday = 29,
+        .tm_hour = 11,
+        .tm_min  = 50,
+        .tm_sec  = 10
+    };
+    ESP_ERROR_CHECK(ds3231_set_time(&dev, &time));
+
+    while (1)
+    {
+
+        if (ds3231_get_time(&dev, &time) != ESP_OK)
+        {
+            printf("Could not get time\n");
+            continue;
+        }
+
+        printf("%04d-%02d-%02d %02d:%02d:%02d\n", time.tm_year + 1900 /*Add 1900 for better readability*/, time.tm_mon + 1,
+            time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+    }
+}
+
 TaskHandle_t save_spiffs_taskHandle = NULL;
 void save_spiffs_task(void *pvParameters) {
     if (queueTemperatura == NULL || queueUmidade == NULL || queuePressao == NULL) 
@@ -312,6 +348,11 @@ void app_main(void)
         }else{
             vTaskResume(pressao_taskHandle);
         }
+        if (rtc_taskHandle == NULL){
+            xTaskCreate(rtc_task, "rtc_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &rtc_taskHandle);
+        }else{
+            vTaskResume(rtc_taskHandle);
+        }        
 
         // ATUA DE ACORDO COM A CAUSA DO WAKE UP
         if (causa == ESP_SLEEP_WAKEUP_TIMER){
@@ -375,6 +416,7 @@ void app_main(void)
         // SUSPENDE AS TAREFAS DOS SENSORES
         vTaskSuspend(pressao_taskHandle);
         vTaskSuspend(dht11_taskHandle);
+        vTaskSuspend(rtc_taskHandle);
     }
 }
 
