@@ -9,6 +9,9 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
+// SPIFFS
+#include "esp_spiffs.h"
+
 //Includes ESP-IDF
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -60,10 +63,40 @@ QueueHandle_t queueTemperatura;
 QueueHandle_t queueUmidade;
 QueueHandle_t queuePressao;
 
+static const char *TAG_SPIFFS = "SPIFFS";
 static const char *TAG = "MQTT Task";
 static const char *TAG_TEMPERATURA = "Temperatura Task";
 static const char *TAG_UMIDADE = "Umidade Task";
 static const char *TAG_PRESSAO = "Pressao Task";
+
+// Inicialização do SPIFFS
+static esp_err_t init_spiffs() {
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = NULL,
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao inicializar SPIFFS (%s)", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+// Salvar dados no SPIFFS
+static void salvar_dados_spiffs(float temperatura, float umidade, uint32_t pressao) {
+    FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "a");
+    if (arquivo == NULL) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para escrita!");
+        return;
+    }
+
+    fprintf(arquivo, "%.2f,%.2f,%" PRIu32 "\n", temperatura, umidade, pressao);
+    fclose(arquivo);
+    ESP_LOGI(TAG_SPIFFS, "Dados salvos no SPIFFS: Temp=%.2f°C, Umid=%.2f%%, Press= %" PRIu32 " Pa", temperatura, umidade, pressao);
+}
 
 // Definição do struct 
 struct Dados { 
@@ -142,13 +175,37 @@ void pressao_task(void *pvParameters)
 }
 
 TaskHandle_t save_spiffs_taskHandle = NULL;
-void save_spiffs_task(void *pvParameters){
-    // IMPLEMENTAR
-    while (true)
+void save_spiffs_task(void *pvParameters) {
+    if (queueTemperatura == NULL || queueUmidade == NULL || queuePressao == NULL) 
     {
-        vTaskDelay(6000/portTICK_PERIOD_MS);
+        ESP_LOGE(TAG_SPIFFS, "Erro: Uma ou mais filas não foram criadas!");
+        vTaskDelete(NULL);  // Encerra a tarefa
+    }   
+
+    float temperatura, umidade;
+    uint32_t pressao;
+
+    while (true) {
+        // Aguarda os valores das filas (bloqueia até receber)
+        if (xQueueReceive(queueTemperatura, &temperatura, portMAX_DELAY) &&
+            xQueueReceive(queueUmidade, &umidade, portMAX_DELAY) &&
+            xQueueReceive(queuePressao, &pressao, portMAX_DELAY)) 
+        {
+            // Salvar dados no SPIFFS
+            salvar_dados_spiffs(temperatura, umidade, pressao);
+
+        } else {
+            ESP_LOGE(TAG_SPIFFS, "Falha ao receber dados da fila.");
+        }
+
+        // Aguarda um tempo antes de repetir a operação
+        vTaskDelay(pdMS_TO_TICKS(6000));
+
+        // Libera o semáforo para sincronizar com a main
         xSemaphoreGive(semaphore);
-        vTaskDelay(6000/portTICK_PERIOD_MS);
+
+        // Aguarda mais um tempo antes de continuar
+        vTaskDelay(pdMS_TO_TICKS(6000));
     }
 }
 
@@ -227,13 +284,15 @@ void app_main(void)
     // task
     ESP_ERROR_CHECK(i2cdev_init());
 
+    ESP_ERROR_CHECK(init_spiffs());
+
     config_sleep_and_button();
     int64_t sleep_time_total = 0;
     
     while (true)
     {
         // SEMPRE RESETA O SEMAFORO
-        semaphore = xSemaphoreCreateCounting( 1, 0 );
+        semaphore = xSemaphoreCreateCounting(1, 0 );
 
         // VERIFICA BOTAO
         button_check();
@@ -249,7 +308,7 @@ void app_main(void)
             vTaskResume(dht11_taskHandle);
         }
         if (pressao_taskHandle == NULL){
-            xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &pressao_taskHandle, APP_CPU_NUM);
+            xTaskCreate(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &pressao_taskHandle);
         }else{
             vTaskResume(pressao_taskHandle);
         }
