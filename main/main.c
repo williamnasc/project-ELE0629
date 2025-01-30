@@ -11,6 +11,8 @@
 
 // SPIFFS
 #include "esp_spiffs.h"
+#include <sys/unistd.h>
+#include <sys/stat.h>
 
 //RTC
 #include <ds3231.h>
@@ -55,7 +57,7 @@ SemaphoreHandle_t semaphore;
 
 #define BOTAO 0
 #define TIME_SLEEPING 2 // TEMPO EM SEGUNGOS
-#define TIME_TO_UPDATE_MQTT_DATA 10000 // TEMPO EM MILISEGUNDOS
+#define TIME_TO_UPDATE_MQTT_DATA 6000 // TEMPO EM MILISEGUNDOS
 
 /*Prototipo de Metodos Auxiliares*/
 void button_check();      
@@ -65,6 +67,7 @@ int64_t start_sleep();
 QueueHandle_t queueTemperatura;
 QueueHandle_t queueUmidade;
 QueueHandle_t queuePressao;
+QueueHandle_t queueRtc;
 
 static const char *TAG_SPIFFS = "SPIFFS";
 static const char *TAG = "MQTT Task";
@@ -234,17 +237,21 @@ void rtc_task(void *pvParameters)
     i2c_dev_t dev;
     memset(&dev, 0, sizeof(i2c_dev_t));
 
+    //inicia a fila que salva os valores de temperatura
+    queueRtc = xQueueCreate(1, sizeof(char[100]));
+
     ESP_ERROR_CHECK(ds3231_init_desc(&dev, 0, GPIO_NUM_18, GPIO_NUM_19));
 
     struct tm time = {
         .tm_year = 125, //since 1900 (2025 - 1900)
         .tm_mon  = 0,  // 0-based
         .tm_mday = 29,
-        .tm_hour = 19,
-        .tm_min  = 50,
+        .tm_hour = 21,
+        .tm_min  = 41,
         .tm_sec  = 10
     };
-    ESP_ERROR_CHECK(ds3231_set_time(&dev, &time));
+    // CONFIGURA A HORA DO RTC
+    // ESP_ERROR_CHECK(ds3231_set_time(&dev, &time));
 
     while (1)
     {
@@ -255,8 +262,23 @@ void rtc_task(void *pvParameters)
             continue;
         }
 
-        printf("%04d-%02d-%02d %02d:%02d:%02d\n", time.tm_year + 1900 /*Add 1900 for better readability*/, time.tm_mon + 1,
-            time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+        // printf("%04d-%02d-%02d %02d:%02d:%02d\n", time.tm_year + 1900 /*Add 1900 for better readability*/, time.tm_mon + 1,
+        //     time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+
+        char rtc_time[100];
+        sprintf(
+            rtc_time, 
+            "%04d-%02d-%02d %02d:%02d:%02d\n", 
+            time.tm_year + 1900, time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec
+        );
+        printf("%s \n",rtc_time);
+
+        if (xQueueSend(queueRtc, &rtc_time, portMAX_DELAY) == pdPASS) {
+            printf("Enviado para a fila RTC: ");
+        } else {
+            printf("Falha ao enviar para a fila RTC");
+        }
+
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
@@ -281,6 +303,7 @@ void save_spiffs_task(void *pvParameters) {
             // Salvar dados no SPIFFS
             salvar_dados_spiffs(temperatura, umidade, pressao);
             xSemaphoreGive(semaphore);
+            vTaskSuspend(save_spiffs_taskHandle);
         } else {
             ESP_LOGE(TAG_SPIFFS, "Falha ao receber dados da fila.");
         }
@@ -330,10 +353,29 @@ void mqtt_task(void *pvParameters)
             //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
             if (pacote.temperatura != 0.0 && pacote.umidade != 0.0 && pacote.pressao != 0.0)
             {
+                
+                // ENVIAR OS DADOS DO ARQUIVO
+                // ler_dados_spiffs();
+                FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "r");
+                if (arquivo == NULL) {
+                    ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para leitura!");
+                    return;
+                }
+                char linha[128];
+                int contador = 0;
+                ESP_LOGI(TAG, "Lendo dados do arquivo SPIFFS:");
+                while (fgets(linha, sizeof( linha), arquivo) != NULL) {
+                    // printf("Leitura %d: %s", ++contador, linha);
+                    mqtt_publish("ELE0629/Weather/Data", linha, 0, 0);
+                }
+                fclose(arquivo);
 
+                ESP_LOGI(TAG, "Total de leituras realizadas: %d", contador);
+
+                // ENVIA OS DADOS COLETADOS AGORA
                 ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
 
-                char json_string[50];
+                char json_string[100];
                 sprintf(
                     json_string, 
                     "{Temp: %.2f °C, Umi: %.2f, Press: %"PRIu32" Pa}", 
@@ -347,6 +389,10 @@ void mqtt_task(void *pvParameters)
                 pacote.temperatura = 0.0;
                 pacote.umidade = 0.0;
                 pacote.pressao = 0.0;
+
+                printf("DELETANDO !!!\n");
+                // DELETA ARQUIVO
+                unlink("/spiffs/dados_sensores.csv");
 
                 // LIBERA A TAREFA MAIN
                 xSemaphoreGive(semaphore);
