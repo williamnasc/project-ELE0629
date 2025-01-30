@@ -37,6 +37,11 @@
 #include <bmp180.h>
 #include <dht.h>
 
+//Server HTTP
+#include "DHT22.h"
+#include "wifi_app.h"
+#include "http_server.h"
+
 //Configuração do bmp180
 #ifndef APP_CPU_NUM
 #define APP_CPU_NUM PRO_CPU_NUM
@@ -466,8 +471,20 @@ void app_main(void)
             }
             // SUSPENDE A TAREFA
             vTaskSuspend(save_spiffs_taskHandle);
+
         }else{
             printf("SOBE O SERVIDOR HTTP\n");
+            // Initialize NVS
+            esp_err_t ret = nvs_flash_init();
+            if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+            {
+                ESP_ERROR_CHECK(nvs_flash_erase());
+                ret = nvs_flash_init();
+            }
+            ESP_ERROR_CHECK(ret);
+
+            // Start Wifi
+            wifi_app_start();
         }
 
         printf("Sono total %lld ms\n", sleep_time_total);

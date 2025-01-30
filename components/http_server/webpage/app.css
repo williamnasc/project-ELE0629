@@ -1,0 +1,123 @@
+/* Estilo Global */
+body {
+    background-color: #f1f1f1;
+    font-family: HelveticaNeueRegular, HelveticaNeue-Regular, "Helvetica Neue Regular", HelveticaNeue, "Helvetica Neue", Helvetica, Arial;
+    color: #1d3557;
+    margin: 0;
+    padding: 0;
+}
+
+/* Cabeçalho */
+h1 {
+    display: block;
+    text-align: center;
+    margin: 0;
+    padding: 20px;
+    font-size: 2em;
+    color: #1d3557;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background-color: #0272B7;
+    color: white;
+    border-bottom: 3px solid #1d4ed8;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+/* Títulos */
+h2 {
+    font-size: 1.6em;
+    color: #1d3557;
+    border-bottom: 2px solid #1d4ed8;
+    padding-bottom: 5px;
+    margin-bottom: 15px;
+}
+
+h3 {
+    font-size: 1.4em;
+    color: #1d3557;
+}
+
+h4 {
+    font-size: 1.2em;
+    color: #1d3557;
+}
+
+/* Contêineres */
+#OTA, #DHT22Sensor, #WeatherLocalData {
+    max-width: 800px;
+    margin: 20px auto;
+    padding: 20px;
+    background-color: white;
+    border-radius: 10px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Último firmware */
+#latest_firmware, #latest_firmware_label {
+    display: inline;
+    color: #1d3557;
+}
+
+/* Leituras */
+#temperature_reading, #humidity_reading {
+    display: inline;
+    color: #1d3557;
+}
+
+/* Leituras */
+#temperature_reading2, #humidity_reading2 {
+    display: inline;
+    color: #1d3557;
+}
+
+/* Botões */
+.buttons {
+    padding: 10px;
+    text-align: center;
+}
+
+input[type="button"] {
+    font-size: 14px;
+    border: 0;
+    line-height: 2;
+    padding: 10px 20px;
+    text-align: center;
+    color: #ffffff;
+    border-radius: 10px;
+    background-color: #0272B7;
+    background-image: linear-gradient(to top left,
+                                      rgba(0, 0, 0, .2),
+                                      rgba(0, 0, 0, .2) 30%,
+                                      rgba(0, 0, 0, 0));
+    box-shadow: inset 2px 2px 3px rgba(255, 255, 255, .6),
+                inset -2px -2px 3px rgba(0, 0, 0, .6),
+                0 4px 6px rgba(0, 0, 0, 0.1);
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+input[type="button"]:hover {
+    background-color: #1d4ed8;
+    box-shadow: inset 2px 2px 3px rgba(255, 255, 255, .6),
+                inset -2px -2px 3px rgba(0, 0, 0, .6),
+                0 6px 10px rgba(0, 0, 0, 0.15);
+}
+
+input[type="button"]:active {
+    box-shadow: inset -2px -2px 3px rgba(255, 255, 255, .6),
+                inset 2px 2px 3px rgba(0, 0, 0, .6);
+}
+
+/* Separadores */
+hr {
+    border: none;
+    border-top: 1px solid #ddd;
+    margin: 20px 0;
+}
+
+/* Centralização */
+.container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 20px;
+}
