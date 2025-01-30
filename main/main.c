@@ -7,6 +7,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
+
+// SPIFFS
+#include "esp_spiffs.h"
+#include <sys/unistd.h>
+#include <sys/stat.h>
+
+//RTC
+#include <ds3231.h>
 
 //Includes ESP-IDF
 #include "esp_log.h"
@@ -44,9 +53,11 @@
 #define SENSOR_TYPE DHT_TYPE_SI7021
 #endif
 
+SemaphoreHandle_t semaphore;
+
 #define BOTAO 0
-#define TIME_SLEEPING 5 // TEMPO EM SEGUNGOS
-#define TIME_TO_UPDATE_MQTT_DATA 20000 // TEMPO EM MILISEGUNDOS
+#define TIME_SLEEPING 2 // TEMPO EM SEGUNGOS
+#define TIME_TO_UPDATE_MQTT_DATA 6000 // TEMPO EM MILISEGUNDOS
 
 /*Prototipo de Metodos Auxiliares*/
 void button_check();      
@@ -56,11 +67,92 @@ int64_t start_sleep();
 QueueHandle_t queueTemperatura;
 QueueHandle_t queueUmidade;
 QueueHandle_t queuePressao;
+QueueHandle_t queueRtc;
 
+static const char *TAG_SPIFFS = "SPIFFS";
 static const char *TAG = "MQTT Task";
 static const char *TAG_TEMPERATURA = "Temperatura Task";
 static const char *TAG_UMIDADE = "Umidade Task";
 static const char *TAG_PRESSAO = "Pressao Task";
+
+// Inicialização do SPIFFS
+static esp_err_t init_spiffs() {
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = NULL,
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao inicializar SPIFFS (%s)", esp_err_to_name(ret));
+    }
+    
+
+    /***        VERIFICANDO INFORMAÇÕES DO SPIFFS       ***/
+    size_t total = 0;
+    size_t usado = 0;
+
+    ret = esp_spiffs_info(conf.partition_label, &total, &usado);
+
+    if(ret != ESP_OK){
+        ESP_LOGE(TAG_SPIFFS, "Falha ao obter informações da partição SPIFFS: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG_SPIFFS, "Formantando a partição!");
+        esp_spiffs_format(conf.partition_label);
+        return ret;
+    }else{
+        ESP_LOGI(TAG_SPIFFS, "Tamanho total da partição:\n Total: %d\n Usada: %d", total, usado);
+    }
+
+    if(usado > total){
+        ESP_LOGW(TAG_SPIFFS, "Número de bytes utilizados não pode ser maior que o tamanho total da partiação!");
+        ESP_LOGW(TAG_SPIFFS, "Realizando SPIFFS_check()!");
+        ret = esp_spiffs_check(conf.partition_label);
+
+        if(ret != ESP_OK){
+            ESP_LOGE(TAG_SPIFFS, "SPIFFS_check falhou: %s", esp_err_to_name(ret));
+            return ret;
+        } else{
+            ESP_LOGI(TAG_SPIFFS, "SPIFFS_check completado com sucesso!");
+        }
+    }
+
+    return ret;
+}
+
+// Salvar dados no SPIFFS
+static void salvar_dados_spiffs(float temperatura, float umidade, uint32_t pressao) {
+    FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "a");
+    if (arquivo == NULL) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para escrita!");
+        return;
+    }
+
+    fprintf(arquivo, "%.2f,%.2f,%" PRIu32 "\n", temperatura, umidade, pressao);
+    fclose(arquivo);
+    ESP_LOGI(TAG_SPIFFS, "Dados salvos no SPIFFS: Temp=%.2f°C, Umid=%.2f%%, Press= %" PRIu32 " Pa", temperatura, umidade, pressao);
+}
+
+// Ler dados do arquivo
+static void ler_dados_spiffs() {
+    FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "r");
+    if (arquivo == NULL) {
+        ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para leitura!");
+        return;
+    }
+
+    char linha[128];
+    int contador = 0;
+
+    ESP_LOGI(TAG_SPIFFS, "Lendo dados do arquivo SPIFFS:");
+    while (fgets(linha, sizeof( linha), arquivo) != NULL) {
+        printf("Leitura %d: %s", ++contador, linha);
+    }
+    fclose(arquivo);
+
+    ESP_LOGI(TAG_SPIFFS, "Total de leituras realizadas: %d", contador);
+}
 
 // Definição do struct 
 struct Dados { 
@@ -70,6 +162,7 @@ struct Dados {
     uint32_t pressao; 
 };
 
+TaskHandle_t dht11_taskHandle = NULL;
 void dht11_task(void *pvParameters)
 {
     float temperatura, umidade;
@@ -107,6 +200,7 @@ void dht11_task(void *pvParameters)
     }
 }
 
+TaskHandle_t pressao_taskHandle = NULL;
 void pressao_task(void *pvParameters)
 {
     bmp180_dev_t dev;
@@ -136,6 +230,87 @@ void pressao_task(void *pvParameters)
     }
 }
 
+
+TaskHandle_t rtc_taskHandle = NULL;
+void rtc_task(void *pvParameters)
+{
+    i2c_dev_t dev;
+    memset(&dev, 0, sizeof(i2c_dev_t));
+
+    //inicia a fila que salva os valores de temperatura
+    queueRtc = xQueueCreate(1, sizeof(char[100]));
+
+    ESP_ERROR_CHECK(ds3231_init_desc(&dev, 0, GPIO_NUM_18, GPIO_NUM_19));
+
+    struct tm time = {
+        .tm_year = 125, //since 1900 (2025 - 1900)
+        .tm_mon  = 0,  // 0-based
+        .tm_mday = 29,
+        .tm_hour = 21,
+        .tm_min  = 41,
+        .tm_sec  = 10
+    };
+    // CONFIGURA A HORA DO RTC
+    // ESP_ERROR_CHECK(ds3231_set_time(&dev, &time));
+
+    while (1)
+    {
+
+        if (ds3231_get_time(&dev, &time) != ESP_OK)
+        {
+            printf("Could not get time\n");
+            continue;
+        }
+
+        // printf("%04d-%02d-%02d %02d:%02d:%02d\n", time.tm_year + 1900 /*Add 1900 for better readability*/, time.tm_mon + 1,
+        //     time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+
+        char rtc_time[100];
+        sprintf(
+            rtc_time, 
+            "%04d-%02d-%02d %02d:%02d:%02d\n", 
+            time.tm_year + 1900, time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec
+        );
+        printf("%s \n",rtc_time);
+
+        if (xQueueSend(queueRtc, &rtc_time, portMAX_DELAY) == pdPASS) {
+            printf("Enviado para a fila RTC: ");
+        } else {
+            printf("Falha ao enviar para a fila RTC");
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+TaskHandle_t save_spiffs_taskHandle = NULL;
+void save_spiffs_task(void *pvParameters) {
+    if (queueTemperatura == NULL || queueUmidade == NULL || queuePressao == NULL) 
+    {
+        ESP_LOGE(TAG_SPIFFS, "Erro: Uma ou mais filas não foram criadas!");
+        vTaskDelete(NULL);  // Encerra a tarefa
+    }   
+
+    float temperatura, umidade;
+    uint32_t pressao;
+
+    while (true) {
+        // Aguarda os valores das filas (bloqueia até receber)
+        if (xQueueReceive(queueTemperatura, &temperatura, portMAX_DELAY) &&
+            xQueueReceive(queueUmidade, &umidade, portMAX_DELAY) &&
+            xQueueReceive(queuePressao, &pressao, portMAX_DELAY)) 
+        {
+            // Salvar dados no SPIFFS
+            salvar_dados_spiffs(temperatura, umidade, pressao);
+            xSemaphoreGive(semaphore);
+            vTaskSuspend(save_spiffs_taskHandle);
+        } else {
+            ESP_LOGE(TAG_SPIFFS, "Falha ao receber dados da fila.");
+        }
+    }
+}
+
+TaskHandle_t mqtt_taskHandle = NULL;
 void mqtt_task(void *pvParameters)
 {
     // Inicializando NVS
@@ -156,7 +331,7 @@ void mqtt_task(void *pvParameters)
         // INICIA A ESTRUTA QUE JUNTA OS DADOS
         struct Dados pacote = {NULL, 0.0, 0.0, 0.0};
 
-        if(mqtt_connected()){
+        if(mqtt_connected()){            
             // ATUALIZA STATUS
             mqtt_publish("ELE0629/Weather/Status", "ON", 0, 0);
 
@@ -178,10 +353,29 @@ void mqtt_task(void *pvParameters)
             //VERIFICA SE ESTA TODO MUNDO PREENCHIDO PRA ENVIAR
             if (pacote.temperatura != 0.0 && pacote.umidade != 0.0 && pacote.pressao != 0.0)
             {
+                
+                // ENVIAR OS DADOS DO ARQUIVO
+                // ler_dados_spiffs();
+                FILE *arquivo = fopen("/spiffs/dados_sensores.csv", "r");
+                if (arquivo == NULL) {
+                    ESP_LOGE(TAG_SPIFFS, "Erro ao abrir arquivo para leitura!");
+                    return;
+                }
+                char linha[128];
+                int contador = 0;
+                ESP_LOGI(TAG, "Lendo dados do arquivo SPIFFS:");
+                while (fgets(linha, sizeof( linha), arquivo) != NULL) {
+                    // printf("Leitura %d: %s", ++contador, linha);
+                    mqtt_publish("ELE0629/Weather/Data", linha, 0, 0);
+                }
+                fclose(arquivo);
 
+                ESP_LOGI(TAG, "Total de leituras realizadas: %d", contador);
+
+                // ENVIA OS DADOS COLETADOS AGORA
                 ESP_LOGI(TAG_TEMPERATURA, "Temperatura no pacote: %.2f",  pacote.temperatura);
 
-                char json_string[50];
+                char json_string[100];
                 sprintf(
                     json_string, 
                     "{Temp: %.2f °C, Umi: %.2f, Press: %"PRIu32" Pa}", 
@@ -195,6 +389,14 @@ void mqtt_task(void *pvParameters)
                 pacote.temperatura = 0.0;
                 pacote.umidade = 0.0;
                 pacote.pressao = 0.0;
+
+                printf("DELETANDO !!!\n");
+                // DELETA ARQUIVO
+                unlink("/spiffs/dados_sensores.csv");
+
+                // LIBERA A TAREFA MAIN
+                xSemaphoreGive(semaphore);
+                printf("LIBERADO !!!!!\n");
             }
         }
         vTaskDelay(4000/portTICK_PERIOD_MS);
@@ -206,12 +408,105 @@ void app_main(void)
     // task
     ESP_ERROR_CHECK(i2cdev_init());
 
-    // xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
-    // xTaskCreatePinnedToCore(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL, APP_CPU_NUM);
-    // TODO > COLOCAR A TAREFA DE CONECTIVIDADE PARA OUTRO CORE
-    xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, NULL);
+    ESP_ERROR_CHECK(init_spiffs());
 
-    vTaskDelay(5000/portTICK_PERIOD_MS);
+    config_sleep_and_button();
+    int64_t sleep_time_total = 0;
+    
+    while (true)
+    {
+        // SEMPRE RESETA O SEMAFORO
+        semaphore = xSemaphoreCreateCounting(1, 0 );
+
+        // VERIFICA BOTAO
+        button_check();
+        // COMECA A DORMIR E CONTA O TEMPO DE SONO EM MS MILISEGUNDOS
+        sleep_time_total += start_sleep();
+        // Pega a causa
+        esp_sleep_wakeup_cause_t causa = esp_sleep_get_wakeup_cause();
+
+        // CRIA OU ATIVA AS TAREFAS DOS SENSORES
+        if (dht11_taskHandle == NULL){
+            xTaskCreate(dht11_task, "dht11_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &dht11_taskHandle);
+        }else{
+            vTaskResume(dht11_taskHandle);
+        }
+        if (pressao_taskHandle == NULL){
+            xTaskCreate(pressao_task, "pressao_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &pressao_taskHandle);
+        }else{
+            vTaskResume(pressao_taskHandle);
+        }
+        if (rtc_taskHandle == NULL){
+            xTaskCreate(rtc_task, "rtc_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &rtc_taskHandle);
+        }else{
+            vTaskResume(rtc_taskHandle);
+        }
+
+        // ATUA DE ACORDO COM A CAUSA DO WAKE UP
+        if (causa == ESP_SLEEP_WAKEUP_TIMER){
+            printf("FAZ A MEDIDA E SALVA LOCAL\n");
+
+            if (save_spiffs_taskHandle == NULL){
+                xTaskCreate(save_spiffs_task, "save_spiffs_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &save_spiffs_taskHandle);
+            }else{
+                vTaskResume(save_spiffs_taskHandle);
+            }
+
+            while (true)
+            {
+                // FICA AQUI ENQUANTO N ENVIAR OS DADOS
+                vTaskDelay(5000/portTICK_PERIOD_MS);
+                // LIBERA SE ALGUEM TIVER ADICIONADO AO SEMAFORO
+                if (uxSemaphoreGetCount(semaphore) >= 1){
+                    xSemaphoreTake(semaphore, portMAX_DELAY);
+                    printf("ACABOU !!!!!\n");
+                    break;    
+                }
+                printf("ESPERANDO !!!!!\n");
+            }
+            // SUSPENDE A TAREFA
+            vTaskSuspend(save_spiffs_taskHandle);
+        }else{
+            printf("SOBE O SERVIDOR HTTP\n");
+        }
+
+        printf("Sono total %lld ms\n", sleep_time_total);
+        if (sleep_time_total >= TIME_TO_UPDATE_MQTT_DATA){
+            printf("MANDA PRA O MQTT \n");
+            sleep_time_total = 0;
+            
+            if (mqtt_taskHandle == NULL){
+                xTaskCreate(mqtt_task, "mqtt_task", configMINIMAL_STACK_SIZE * 6, NULL, 2, &mqtt_taskHandle);
+            }else{
+                vTaskResume(mqtt_taskHandle);
+            }
+            
+            while (true)
+            {
+                // FICA AQUI ENQUANTO N ENVIAR OS DADOS
+                vTaskDelay(5000/portTICK_PERIOD_MS);
+                
+                // LIBERA SE ALGUEM TIVER ADICIONADO AO SEMAFORO
+                if (uxSemaphoreGetCount(semaphore) >= 1){
+                    xSemaphoreTake(semaphore, portMAX_DELAY);
+                    printf("ACABOU !!!!!\n");
+                    break;    
+                }
+                printf("ESPERANDO MQTT!!!!!\n");   
+            }
+            // SE ENVIAR, DELETA A TAREFA E SAI VOLTA A DORMIR
+            // DELETA TAREFA PELO HANDLE
+            // if( mqtt_taskHandle != NULL ){ vTaskDelete( mqtt_taskHandle ); }
+            vTaskSuspend(mqtt_taskHandle);
+
+            esp_restart();
+        }
+
+        // SUSPENDE AS TAREFAS DOS SENSORES
+        vTaskSuspend(pressao_taskHandle);
+        vTaskSuspend(dht11_taskHandle);
+        vTaskSuspend(rtc_taskHandle);
+    }
 }
 
 void button_check(){
